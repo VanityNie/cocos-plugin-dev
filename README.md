@@ -128,10 +128,10 @@ cocos-plugin-dev/
 
 ```powershell
 git remote add origin "https://github.com/你的用户名/cocos-plugin-dev.git"
-git push -u origin HEAD
+git push -u origin master
 ```
 
-`HEAD` 会推送当前分支；本地首次整理使用 `codex/initial-plugin-dev`。远端需要自己的访问权限。这些命令仅说明发布步骤，不代表远端仓库已经创建或代码已经推送。
+本地默认分支为 `master`。远端需要自己的访问权限。这些命令仅说明发布步骤，不代表远端仓库已经创建或代码已经推送。
 
 ## 官方参考
 
