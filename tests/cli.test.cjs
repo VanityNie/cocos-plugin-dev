@@ -7,6 +7,7 @@ const os = require('node:os');
 const path = require('node:path');
 const vm = require('node:vm');
 const { EventEmitter } = require('node:events');
+const { spawnSync } = require('node:child_process');
 const { parseArgs, createSandbox } = require('../cli.cjs');
 
 function cliHarness(windows = {}) {
@@ -29,6 +30,41 @@ test('CLI accepts explicit values and rejects misspelled or ambiguous flags', ()
     assert.throws(() => parseArgs(['create', '--project']), /Missing value/);
     assert.throws(() => parseArgs(['create', '--project', '.', '--project', '..']), /Duplicate/);
     assert.throws(() => parseArgs(['create', '--projet', '.']), /Unknown/);
+    assert.equal(parseArgs(['create', '--plugin-path', './plugin']).options.pluginPath, path.resolve('plugin'));
+    assert.equal(parseArgs(['link', '--source-path', './plugin']).options.sourcePath, path.resolve('plugin'));
+});
+
+test('CLI creates independent source, attaches two hosts and keeps enable state local', t => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-cli-hosts-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const cliPath = path.resolve(__dirname, '../cli.cjs');
+    const source = path.join(root, 'independent-source');
+    const invoke = (...args) => {
+        const result = spawnSync(process.execPath, [cliPath, ...args], { encoding: 'utf8' });
+        assert.equal(result.status, 0, result.stderr);
+        return JSON.parse(result.stdout);
+    };
+    invoke('create', '--plugin-path', source, '--name', 'shared-api');
+    const original = fs.readFileSync(path.join(source, 'native/cc_plugin.json'), 'utf8');
+    const hosts = ['game-a', 'game-b'].map(name => {
+        const project = path.join(root, name);
+        fs.mkdirSync(path.join(project, 'assets'), { recursive: true });
+        fs.writeFileSync(path.join(project, 'package.json'), JSON.stringify({ name }));
+        invoke('link', '--project', project, '--source-path', source);
+        return project;
+    });
+    invoke('disable', '--project', hosts[1], '--name', 'shared-api');
+    assert.equal(invoke('list', '--project', hosts[0])[0].enabled, true);
+    assert.equal(invoke('list', '--project', hosts[1])[0].enabled, false);
+    assert.equal(invoke('list', '--project', hosts[0])[0].sourcePath, source);
+    assert.equal(fs.readFileSync(path.join(source, 'native/cc_plugin.json'), 'utf8'), original);
+    invoke('unlink', '--project', hosts[0], '--name', 'shared-api');
+    assert.deepEqual(invoke('list', '--project', hosts[0]), []);
+    assert.ok(fs.existsSync(path.join(source, 'runtime/index.ts')));
+    const missing = spawnSync(process.execPath, [cliPath, 'link', '--project', hosts[0], '--source-path', path.join(root, 'missing')], { encoding: 'utf8' });
+    assert.equal(missing.status, 1);
+    assert.equal(missing.stdout, '');
+    assert.match(missing.stderr, /missing/);
 });
 
 test('sandbox creation preserves template assets but assigns project identity and refuses overwrite', (t) => {

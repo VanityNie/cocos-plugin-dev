@@ -1,6 +1,29 @@
 # 架构
 
-工作台将 Creator 编辑器扩展、运行时 TS 和原生 C++ 组织为一个插件包，并使用当前游戏作为运行与调试宿主。原生编译和加载沿用 [Cocos 官方插件机制](https://docs.cocos.com/creator/4.0/manual/zh/advanced-topics/native-plugins/tutorial.html)。
+工作台将 Creator 编辑器扩展、运行时 TS 和原生 C++ 组织为一个插件包，并使用选定游戏作为运行与调试宿主。独立源码可被多个宿主引用，宿主之间不共享启用状态或构建缓存。原生编译和加载沿用 [Cocos 官方插件机制](https://docs.cocos.com/creator/4.0/manual/zh/advanced-topics/native-plugins/tutorial.html)。
+
+## 独立源码与宿主
+
+独立插件的 `plugin-dev.json` 使用 schemaVersion 2，描述插件身份、模板和原生目标，不保存项目启用状态。宿主根目录的 `plugin-dev.host.json` 保存引用：
+
+```json
+{
+  "schemaVersion": 1,
+  "plugins": {
+    "my-plugin": { "source": "../my-plugin", "enabled": true }
+  }
+}
+```
+
+`source` 相对宿主项目根目录解析；跨磁盘时使用绝对路径。此文件是项目配置，应纳入游戏版本管理。插件源码由自身仓库管理。本机指纹、日志、构建结果仍放在宿主的 `.plugin-dev` 内。
+
+每个宿主在 `extensions/<name>` 生成独立接入目录，包含 Creator 扩展入口、原生清单及 Windows CMake 转发文件。转发文件包含原始源码的 `<target>-config.cmake`，因此编译器和原生调试信息使用原始 C++ 路径。原生清单的 `disabled` 只在宿主接入目录更新。
+
+接入文件记录内容哈希。同步前检查文件归属和冲突，手工修改会明确报错。源码目录缺失、配置错误或监听失败同样报告错误。接入目录缺失时，同步可以根据项目引用重新生成；再次关联同一来源也会同步修复。运行时 TS 沿用受管同步，不通过目录联接或符号链接接入。
+
+解除引用会关闭宿主 TS 开关、移除受管接入目录和项目引用，保留源码及已导入的资源 UUID。状态记录保留 `detached` 和待构建标记，防止直接启动仍包含旧原生模块的游戏。重新关联恢复同步；资源与原生构建完成后，才清除对应待构建标记。
+
+原有 schemaVersion 1 内嵌插件继续使用项目 `extensions/<name>` 作为源码目录。独立源码发布时转换为可直接安装的内嵌格式，不携带宿主绝对路径。
 
 ## 构建与加载
 
@@ -8,7 +31,7 @@
 flowchart LR
     A[插件源码] --> B[runtime 同步到项目 assets]
     B --> C[Creator 构建脚本和资源]
-    A --> D[cc_plugin.json]
+    A --> D[宿主 cc_plugin.json 与 CMake 引用]
     D --> E[扫描清单与 find_package]
     E --> F[CMake 编译与生成注册表]
     C --> G[Windows 游戏宿主]
@@ -20,7 +43,8 @@ flowchart LR
 | 配置或阶段 | 职责 |
 | --- | --- |
 | `package.json` | 声明编辑器入口，加载运行时源码同步模块。 |
-| `plugin-dev.json` | 保存插件名称、模板和启用配置。 |
+| `plugin-dev.json` | 保存插件名称、模板和目标；旧版内嵌格式还保存启用配置。 |
+| `plugin-dev.host.json` | 保存当前游戏对独立源码的引用及启用配置。 |
 | `cc_plugin.json` | 声明原生模块、目标平台和启用状态，供官方构建扫描。 |
 | `<target>-config.cmake` | 通过 `add_subdirectory()` 编译插件源码，也可用于引入第三方库。 |
 | `${ENGINE_NAME}` | 插件链接引擎目标，继承公开的头文件路径与编译定义。 |
@@ -50,7 +74,7 @@ flowchart LR
 
 ## 源码与构建状态
 
-插件的编辑入口是 `extensions/<name>/runtime` 和 `native/src`。运行时 TS 自动同步到 `assets/__plugin_dev/<name>`，由 Creator 导入和打包。同步保留已有 `.meta` 和 UUID；目标文件被手动修改时报告冲突。
+插件的编辑入口是源码目录中的 `runtime` 和 `native/src`；独立源码可以位于游戏项目之外。运行时 TS 自动同步到宿主 `assets/__plugin_dev/<name>`，由 Creator 导入和打包。同步保留已有 `.meta` 和 UUID；目标文件被手动修改时报告冲突。
 
 C++ 直接参与宿主的 CMake 构建，无需先生成库再复制到项目。新增源文件需加入插件的 `CMakeLists.txt`。只修改 C++ 时执行增量编译；TS、启停和资源变化需要更新 Creator 构建资源。
 
@@ -60,11 +84,11 @@ C++ 直接参与宿主的 CMake 构建，无需先生成库再复制到项目。
 
 游戏项目、工具和引擎可以放在独立目录。面板优先使用已保存的引擎配置；未配置时读取当前 Creator 的引擎信息。准备资源前检查 JS 与原生引擎路径，确保脚本资源和 C++ 使用同一套引擎。
 
-编辑器内准备资源使用当前 Creator 的构建服务；CLI 则启动指定 Creator，并以游戏项目为工作目录。`builder/add-task` 属于版本相关接口，不兼容时会报告错误并提供 CLI 回退步骤。
+所选宿主就是当前 Creator 项目时，准备资源使用编辑器构建服务；其他宿主及 CLI 启动指定 Creator，并以目标游戏为工作目录。资源刷新和扩展注册只操作当前编辑器项目。`builder/add-task` 属于版本相关接口，不兼容时会报告错误并提供 CLI 回退步骤。
 
 CMake 管理目标与编译参数，Ninja 执行增量构建。Windows 默认使用 MSVC，也支持 clang-cl；二者均需要匹配的 Windows SDK、MSVC 工具集和第三方库 ABI。clangd 使用 CMake 生成的 `compile_commands.json` 提供代码分析，不参与插件加载。
 
-C++ 和游戏 TS 使用两套调试会话，分别连接原生调试器和 V8 Inspector。TS 源码断点依赖 source map；工具不提供跨语言统一单步或 DLL 热替换。
+C++ 和游戏 TS 使用两套调试会话，分别连接原生调试器和 V8 Inspector。各宿主的工作区加入独立源码目录，clangd 使用该宿主编译数据库，TS 源码映射将导入副本定位回原始文件。生成的 `plugin-enabled.ts` 仍定位宿主副本。TS 源码断点依赖 source map；工具不提供跨语言统一单步或 DLL 热替换。
 
 ## 渲染扩展
 

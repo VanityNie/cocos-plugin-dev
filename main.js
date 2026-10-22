@@ -8,6 +8,8 @@ const PACKAGE_NAME = 'cocos-plugin-dev';
 const tasks = new Map();
 let activeTask = null;
 let nextTaskId = 0;
+let selectedHost = null;
+let selectingHost = false;
 
 function abortError() {
     const error = new Error('操作已取消。');
@@ -20,12 +22,18 @@ function throwIfCancelled(task) {
     if (task.controller.signal.aborted) throw abortError();
 }
 
-function projectPath() {
+function editorProjectPath() {
     const value = Editor.Project.path;
     if (!value || !fs.existsSync(path.join(value, 'package.json'))) {
         throw new Error('请先打开一个 Creator 游戏项目。');
     }
     return path.resolve(value);
+}
+
+function projectPath() { return selectedHost || editorProjectPath(); }
+
+function isEditorHost(project) {
+    return path.relative(editorProjectPath(), project) === '';
 }
 
 function settingsPath(project) {
@@ -147,18 +155,22 @@ function snapshot(task, after = 0) {
 }
 
 async function refreshAssets(task) {
+    if (!isEditorHost(task.projectPath)) return;
     try {
         await Editor.Message.request('asset-db', 'refresh-asset', 'db://assets');
         append(task, '项目资源已刷新。\n');
     } catch (error) {
-        append(task, `文件已写入；编辑器资源刷新失败：${error.message}。请在资源管理器刷新后再构建。\n`);
+        throw new Error(`文件已写入，但当前宿主资源刷新失败：${error.message}。请修复资源数据库错误后重新同步。`);
     }
 }
 
 async function activateGeneratedExtension(task, plugin) {
+    if (!isEditorHost(task.projectPath)) {
+        append(task, '开发引用已写入所选宿主。请在该宿主的 Creator 扩展管理器启用插件以启动源码监视；工作台构建前也会同步源码。\n');
+        return;
+    }
     try {
-        const folder = plugin.pluginPath || plugin.path;
-        if (!folder) throw new Error('生成结果未返回扩展目录。');
+        const folder = plugin.extensionPath;
         // register/enable/getPackages are public Editor.Package functions. Loading
         // the generated extension starts its own runtime-source watcher immediately.
         const registered = Editor.Package.getPackages({ path: folder });
@@ -167,9 +179,26 @@ async function activateGeneratedExtension(task, plugin) {
         await Editor.Message.request(plugin.name, 'sync');
         append(task, '插件编辑器入口已加载，运行时源码自动同步已启动。\n');
     } catch (error) {
-        task.outcome = 'attention';
-        append(task, `插件源码已创建；自动加载编辑器入口未完成：${error.message}\n请在扩展管理器启用该插件，或重载扩展后再使用自动同步。手动“同步”仍可使用。\n`);
+        throw new Error(`插件文件已写入，但宿主扩展入口加载失败：${error.message}。请在扩展管理器启用 ${plugin.extensionPath} 后重新同步。`);
     }
+}
+
+async function unlinkExtension(task, options) {
+    const extensionPath = path.join(task.projectPath, 'extensions', support().validateName(options.name));
+    const registered = isEditorHost(task.projectPath) && Editor.Package.getPackages({ path: extensionPath }).length > 0;
+    if (registered) await Editor.Package.disable(extensionPath);
+    let result;
+    try {
+        result = await core().unlinkPlugin(options);
+    } catch (error) {
+        if (registered && fs.existsSync(extensionPath)) {
+            try { await Editor.Package.enable(extensionPath); }
+            catch (restoreError) { throw new Error(`解除引用失败：${error.message}；恢复源码监视失败：${restoreError.message}。请在扩展管理器重新启用 ${extensionPath}。`); }
+        }
+        throw error;
+    }
+    if (registered) await Editor.Package.unregister(extensionPath);
+    return result;
 }
 
 async function openPath(file) {
@@ -180,7 +209,7 @@ async function openPath(file) {
     return resolved;
 }
 
-const ACTIONS = new Set(['create', 'enable', 'sync', 'package', 'doctor', 'prepare', 'configure', 'build', 'run', 'stop', 'restart', 'build-run', 'debug']);
+const ACTIONS = new Set(['create', 'link', 'unlink', 'enable', 'sync', 'package', 'doctor', 'prepare', 'configure', 'build', 'run', 'stop', 'restart', 'build-run', 'debug']);
 const CANCELLABLE_ACTIONS = new Set(['prepare', 'configure', 'build', 'build-run']);
 
 function requestCancellation(task) {
@@ -205,17 +234,31 @@ async function execute(task, input, settings) {
         ...(settings.enginePath ? { enginePath: settings.enginePath } : {}),
         ...(settings.creatorPath ? { creatorPath: settings.creatorPath } : {}),
         onOutput: (value) => append(task, value),
-        prepareAssets: (request) => prepareInEditor(task, request),
+        ...(isEditorHost(task.projectPath) ? { prepareAssets: (request) => prepareInEditor(task, request) } : {}),
         signal: task.controller.signal,
     };
     const pluginOptions = { ...options, name: input.name };
     let result;
+    if (!isEditorHost(task.projectPath) && ['prepare', 'configure', 'build', 'build-run'].includes(task.action)) {
+        append(task, '所选宿主未在当前编辑器打开。资源构建使用 Creator 命令行；请先保存并关闭该宿主的其他 Creator 窗口。\n');
+    }
     switch (task.action) {
     case 'create':
-        result = await core().createPlugin({ ...pluginOptions, displayName: input.displayName || undefined, template: input.template || 'native' });
+        result = await core().createPlugin({ ...pluginOptions, pluginPath: input.pluginPath || undefined, displayName: input.displayName || undefined, template: input.template || 'native' });
         await activateGeneratedExtension(task, result);
         await refreshAssets(task);
         append(task, '插件已创建。原生入口需要在 Windows 宿主重新构建后生效。\n');
+        break;
+    case 'link':
+        result = await core().linkPlugin({ ...options, sourcePath: input.sourcePath });
+        await activateGeneratedExtension(task, result);
+        await refreshAssets(task);
+        append(task, '插件开发引用已添加。请重新构建 Windows 宿主。\n');
+        break;
+    case 'unlink':
+        result = await unlinkExtension(task, pluginOptions);
+        await refreshAssets(task);
+        append(task, '开发引用已解除，独立插件源码保持不变；宿主保留禁用的运行时文件与资源 UUID。请重新构建 Windows 宿主。\n');
         break;
     case 'enable':
         if (typeof input.enabled !== 'boolean') throw new Error('enabled 必须是布尔值。');
@@ -232,6 +275,10 @@ async function execute(task, input, settings) {
         break;
     case 'doctor':
         result = await windows().doctor(options);
+        if (!isEditorHost(task.projectPath)) {
+            if (result.ok === false) task.outcome = 'attention';
+            break;
+        }
         try {
             const current = await activeEngine();
             const selected = normalizedEngine(settings.enginePath || result.host.enginePath);
@@ -275,7 +322,7 @@ async function execute(task, input, settings) {
             await openPath(result.workspacePath);
             append(task, '已请求系统打开调试工作区。在 VS Code 选择生成的调试配置启动。\n');
         } catch (error) {
-            append(task, `${error.message}\n工作区已生成，可在 VS Code 中手动打开。\n`);
+            throw new Error(`调试工作区已生成到 ${result.workspacePath}，但无法打开：${error.message}`);
         }
         break;
     default: throw new Error('未知操作。');
@@ -284,36 +331,56 @@ async function execute(task, input, settings) {
     return result;
 }
 
+async function contextFor(project) {
+    const plugins = await core().listPlugins({ projectPath: project, includeErrors: true });
+    const lastTask = Array.from(tasks.values()).reverse().find((task) => task.projectPath === project);
+    const settings = readSettings(project);
+    let engineError = null;
+    if (!settings.enginePath && isEditorHost(project)) {
+        try {
+            const engine = await activeEngine();
+            const current = normalizedEngine(engine.path);
+            if (!current || current !== normalizedEngine(engine.nativePath)) throw new Error(`当前编辑器 JS 与 C++ 引擎不一致或不是有效引擎目录：JS=${engine.path}，C++=${engine.nativePath}。请明确设置宿主使用的引擎。`);
+            settings.enginePath = engine.path;
+        } catch (error) { engineError = `无法读取当前编辑器引擎：${error.message}`; }
+    }
+    return {
+        projectPath: project, editorProjectPath: editorProjectPath(), isEditorHost: isEditorHost(project), settings, engineError,
+        plugins, task: snapshot(lastTask),
+    };
+}
+
 exports.methods = {
     openPanel() { return Editor.Panel.open(PACKAGE_NAME); },
 
-    async getContext() {
-        const project = projectPath();
-        const result = await core().listPlugins({ projectPath: project });
-        const lastTask = Array.from(tasks.values()).reverse().find((task) => task.projectPath === project);
-        const settings = readSettings(project);
-        if (!settings.enginePath) {
-            try {
-                const engine = await activeEngine();
-                const current = normalizedEngine(engine.path);
-                if (current && current === normalizedEngine(engine.nativePath)) settings.enginePath = engine.path;
-            } catch (_) { /* Let environment checks explain unavailable editor APIs. */ }
-        }
-        return {
-            projectPath: project, settings,
-            plugins: Array.isArray(result) ? result : result.plugins || [],
-            task: snapshot(lastTask),
-        };
+    getContext() { return contextFor(projectPath()); },
+
+    async selectHost(value) {
+        if (activeTask || selectingHost) throw new Error('当前操作完成后才能切换宿主。');
+        const host = support().projectRoot(value);
+        selectingHost = true;
+        try {
+            const context = await contextFor(host);
+            selectedHost = host;
+            return context;
+        } finally { selectingHost = false; }
+    },
+
+    async chooseDirectory(initialPath) {
+        if (activeTask || selectingHost) throw new Error('当前操作完成后才能选择目录。');
+        // Creator 3.8.8 creator-types/editor/editor.d.ts: public directory dialog.
+        const result = await Editor.Dialog.select({ title: '选择目录', path: initialPath || projectPath(), type: 'directory', multi: false });
+        return result.canceled ? null : result.filePaths[0];
     },
 
     saveSettings(values) {
-        if (activeTask) throw new Error('当前操作完成后才能修改环境配置。');
+        if (activeTask || selectingHost) throw new Error('当前操作完成后才能修改环境配置。');
         return writeSettings(projectPath(), values);
     },
 
     startTask(action, input = {}) {
         if (!ACTIONS.has(action)) throw new Error(`不支持的操作：${action}`);
-        if (activeTask) throw new Error('已有操作正在进行，请等待完成。');
+        if (activeTask || selectingHost) throw new Error('已有操作正在进行，请等待完成。');
         const project = projectPath();
         const settings = readSettings(project);
         const task = {
@@ -364,12 +431,10 @@ exports.methods = {
 
     async openSource(name) {
         const project = projectPath();
-        const result = await core().listPlugins({ projectPath: project });
-        const plugins = Array.isArray(result) ? result : result.plugins || [];
+        const plugins = await core().listPlugins({ projectPath: project });
         const plugin = plugins.find((item) => item.name === name);
         if (!plugin) throw new Error('插件不存在，请刷新列表。');
-        const folder = plugin.path || plugin.pluginPath || path.join(project, 'extensions', name);
-        return openPath(folder);
+        return openPath(plugin.pluginPath);
     },
 };
 

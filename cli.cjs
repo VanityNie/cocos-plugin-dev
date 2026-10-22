@@ -10,7 +10,9 @@ const HELP = `Cocos Plugin Dev — Windows
 node cli.cjs <command> --project <Creator project> [options]
 
   install     Install this developer extension into the project
-  create      Create and enable a TS + C++ plugin (--name, --template native|render)
+  create      Create a TS + C++ plugin (--name, --template native|render)
+  link        Attach existing plugin source to this host (--source-path)
+  unlink      Detach local plugin source; keep source and asset UUIDs (--name)
   list        Show project plugins
   enable      Enable a plugin (--name)
   disable     Disable a plugin (--name); native changes require rebuilding
@@ -27,6 +29,8 @@ node cli.cjs <command> --project <Creator project> [options]
   sandbox     Create an independent project from the installed Creator 3D template
 
 Options:
+  --plugin-path <directory>         Create independent source here; --project optionally attaches a host
+  --source-path <directory>         Existing independent plugin source for link
   --creator-path <CocosCreator.exe>  Select Creator
   --engine-path <engine root>       Select native engine (must match built JS assets)
   --compiler msvc|clang-cl          Windows compiler
@@ -47,6 +51,7 @@ function parseArgs(argv) {
         'creator-path': 'creatorPath', 'engine-path': 'enginePath',
         compiler: 'compiler', 'native-source-dir': 'nativeSourceDir',
         'resource-dir': 'resourceDir',
+        'plugin-path': 'pluginPath', 'source-path': 'sourcePath',
     };
     for (let i = 0; i < rest.length; ++i) {
         const flag = rest[i];
@@ -57,7 +62,9 @@ function parseArgs(argv) {
         if (options[key] !== undefined) throw new Error(`Duplicate argument: ${flag}`);
         options[key] = rest[++i];
     }
-    if (options.projectPath) options.projectPath = path.resolve(options.projectPath);
+    for (const key of ['projectPath', 'pluginPath', 'sourcePath']) {
+        if (options[key]) options[key] = path.resolve(options[key]);
+    }
     return { command, options };
 }
 
@@ -99,17 +106,21 @@ async function main(argv, { signal } = {}) {
     checkCancelled(signal);
     if (!argv.length || ['help', '--help', '-h'].includes(argv[0])) return process.stdout.write(HELP);
     const { command, options } = parseArgs(argv);
-    if (!options.projectPath) throw new Error('--project is required');
-    const settingsPath = path.join(options.projectPath, '.plugin-dev', 'ui-settings.json');
+    if (!options.projectPath && !(command === 'create' && options.pluginPath)) {
+        throw new Error('--project is required; standalone create uses --plugin-path');
+    }
+    const settingsPath = options.projectPath && path.join(options.projectPath, '.plugin-dev', 'ui-settings.json');
     let settings = {};
-    if (command !== 'sandbox' && fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, ''));
+    if (command !== 'sandbox' && settingsPath && fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, ''));
     const input = { ...settings, ...options, signal, onOutput: (message) => process.stderr.write(String(message)) };
     let result;
     if (command === 'sandbox') result = createSandbox(input);
-    else if (['install', 'create', 'list', 'enable', 'disable', 'sync', 'package'].includes(command)) {
+    else if (['install', 'create', 'link', 'unlink', 'list', 'enable', 'disable', 'sync', 'package'].includes(command)) {
         const core = require('./lib/core.cjs');
         if (command === 'install') result = await core.installTools({ ...input, sourcePath: __dirname });
         else if (command === 'create') result = await core.createPlugin({ ...input, template: input.template || 'native' });
+        else if (command === 'link') result = await core.linkPlugin(input);
+        else if (command === 'unlink') result = await core.unlinkPlugin(input);
         else if (command === 'list') result = await core.listPlugins(input);
         else if (command === 'enable' || command === 'disable') result = await core.setEnabled({ ...input, enabled: command === 'enable' });
         else if (command === 'sync') result = await core.syncPlugin(input);

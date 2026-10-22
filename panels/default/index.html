@@ -3,37 +3,57 @@
     <div><span class="eyebrow">WINDOWS · TS + C++</span><h1>插件开发</h1></div>
     <button id="refresh" class="quiet" type="button">刷新</button>
   </header>
-  <p class="intro">在当前游戏中创建插件，复用项目场景、资源和原生宿主进行调试。</p>
-  <div class="project"><span>当前项目</span><code id="project-path">正在连接编辑器…</code></div>
+  <p class="intro">独立维护 TS + C++ 插件源码，为游戏添加开发引用，复用宿主场景与资源进行调试。</p>
+  <div class="project"><span>当前编辑器</span><code id="editor-project-path">正在连接编辑器…</code></div>
   <div id="notice" role="status" aria-live="polite"></div>
 
   <section>
-    <h2><span class="step">1</span> 创建插件</h2>
+    <h2><span class="step">1</span> 选择游戏宿主</h2>
+    <form id="host-form" class="path-form">
+      <label>宿主项目目录<input id="host-path" placeholder="已有 Creator 游戏项目目录" required autocomplete="off" data-mutation /></label>
+      <div class="toolbar"><button id="browse-host" type="button" data-mutation>选择目录</button><button type="submit" data-mutation>切换宿主</button><button id="use-editor-host" type="button" data-mutation>使用当前编辑器项目</button></div>
+    </form>
+    <div class="project selected-host"><span>操作目标</span><code id="project-path">正在连接编辑器…</code></div>
+    <p id="host-note" class="hint"></p>
+  </section>
+
+  <section>
+    <h2><span class="step">2</span> 创建或引用插件</h2>
     <form id="create-form">
       <div class="fields">
-        <label>插件标识<input id="plugin-name" placeholder="neural-render" pattern="[a-z][a-z0-9-]*" required maxlength="64" autocomplete="off" /></label>
-        <label>显示名称<input id="display-name" placeholder="神经网络渲染" maxlength="100" autocomplete="off" /></label>
-        <label>模板<select id="template"><option value="native">原生能力 · TS ↔ C++</option><option value="render">渲染扩展 · 自定义 Pass 骨架</option></select></label>
+        <label>插件标识<input id="plugin-name" placeholder="neural-render" pattern="[a-z][a-z0-9-]*" required maxlength="64" autocomplete="off" data-mutation /></label>
+        <label>显示名称<input id="display-name" placeholder="神经网络渲染" maxlength="100" autocomplete="off" data-mutation /></label>
+        <label>模板<select id="template" data-mutation><option value="native">原生能力 · TS ↔ C++</option><option value="render">渲染扩展 · 自定义 Pass 骨架</option></select></label>
       </div>
-      <div class="row"><p class="hint">生成源码、CMake、原生清单与 TS 类型。插件标识使用小写字母、数字和连字符。</p><button type="submit" class="primary" data-mutation>创建并启用</button></div>
+      <label class="location-field">源码位置<select id="plugin-location" data-mutation><option value="independent">独立插件项目</option><option value="embedded">所选宿主 extensions 内</option></select></label>
+      <div id="independent-location" class="path-form">
+        <label>新建插件目录<input id="plugin-path" placeholder="E:\code\work\neural-render" required autocomplete="off" data-mutation /></label>
+        <button id="browse-plugin-parent" type="button" data-mutation>选择上级目录</button>
+      </div>
+      <div class="row"><p class="hint">生成源码、CMake、原生清单与 TS 类型，并引用到所选宿主。独立目录可单独提交 Git，由多个宿主使用。</p><button type="submit" class="primary" data-mutation>创建并引用到宿主</button></div>
+    </form>
+    <form id="link-form" class="attach-form">
+      <label>已有插件源码目录<input id="source-path" placeholder="包含 plugin-dev.json 的独立插件目录" required autocomplete="off" data-mutation /></label>
+      <div class="row"><p class="hint">各宿主独立保存启用状态和构建缓存，源码修改会同步到各自运行时副本。</p><div class="toolbar"><button id="browse-source" type="button" data-mutation>选择目录</button><button type="submit" data-mutation>添加开发引用</button></div></div>
     </form>
   </section>
 
   <section>
-    <div class="section-header"><h2><span class="step">2</span> 项目插件</h2><span id="plugin-count" class="subtle"></span></div>
+    <div class="section-header"><h2><span class="step">3</span> 所选宿主的插件</h2><span id="plugin-count" class="subtle"></span></div>
     <div id="plugins"><p class="empty">正在读取插件…</p></div>
     <p class="hint">插件源码是编辑入口。同步会更新项目中的运行时副本；启用或禁用原生插件，需要重新构建后生效。</p>
   </section>
 
   <section>
-    <h2><span class="step">3</span> Windows 联合调试</h2>
+    <h2><span class="step">4</span> Windows 联合调试</h2>
     <details id="settings-details">
       <summary>环境设置</summary>
       <div class="settings">
+        <p id="engine-error" class="error-message" role="status" hidden></p>
         <label>引擎源码目录<input id="engine-path" placeholder="引擎根目录，如 E:\engines\cocos-engine" autocomplete="off" /></label>
         <label>Creator 路径<input id="creator-path" placeholder="留空自动检测；或填 Creator 目录 / CocosCreator.exe" autocomplete="off" /></label>
         <label>插件导出目录<input id="output-dir" placeholder="默认 .plugin-dev/packages" autocomplete="off" /></label>
-        <div class="row"><p class="hint">配置保存在当前项目 .plugin-dev 中。原生构建缓存与项目已有缓存分开保存。</p><button id="save-settings" type="button" data-mutation>保存设置</button></div>
+        <div class="row"><p class="hint">配置和构建缓存保存在所选宿主 .plugin-dev 中，切换宿主会切换配置。</p><button id="save-settings" type="button" data-mutation>保存设置</button></div>
       </div>
     </details>
     <div class="toolbar">
@@ -50,7 +70,7 @@
       <button type="button" data-action="restart" data-mutation>重启游戏</button>
       <button type="button" data-action="debug" data-mutation>打开调试工作区</button>
     </div>
-    <p class="hint">首次准备使用当前编辑器生成 Windows 宿主。Creator 当前使用的 JS 与 C++ 引擎须与环境设置一致。调试工作区提供 C++ 与 TS 调试配置；断点调试从 VS Code 启动。</p>
+    <p class="hint">当前编辑器项目通过编辑器构建资源；其他宿主通过 Creator 命令行构建，需先关闭该宿主的 Creator 窗口。调试工作区提供 C++ 与 TS 调试配置。</p>
   </section>
 
   <section class="log-section">

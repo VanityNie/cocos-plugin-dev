@@ -1,6 +1,6 @@
 {
   "name": "cocos-plugin-dev",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
   "homepage": "https://github.com/VanityNie/cocos-plugin-dev#readme",
   "bugs": "https://github.com/VanityNie/cocos-plugin-dev/issues",
   "package_version": 2,
-  "description": "Windows 原生插件开发工作台：在当前项目中开发和调试 TS + C++ 插件。",
+  "description": "Windows 原生插件开发工作台：创建独立 TS + C++ 插件，为游戏宿主添加开发引用并联合调试。",
   "author": "Cocos Plugin Development",
   "main": "./main.js",
   "scripts": {
@@ -32,6 +32,8 @@
     "messages": {
       "open-panel": { "methods": ["openPanel"] },
       "get-context": { "methods": ["getContext"] },
+      "select-host": { "methods": ["selectHost"] },
+      "choose-directory": { "methods": ["chooseDirectory"] },
       "save-settings": { "methods": ["saveSettings"] },
       "start-task": { "methods": ["startTask"] },
       "get-task": { "methods": ["getTask"] },

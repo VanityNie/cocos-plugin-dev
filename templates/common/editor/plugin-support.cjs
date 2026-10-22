@@ -67,11 +67,10 @@ function recoverDeadLock(project, directory, ownerFile) {
     try { fs.mkdirSync(recovery); } catch (error) { if (error.code === 'EEXIST') return; throw error; }
     try {
         if (!fs.existsSync(ownerFile)) return;
-        let owner;
-        try { owner = readJson(ownerFile); } catch (_) { return; }
-        if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return;
+        const owner = readJson(ownerFile);
+        if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) fail(`插件锁记录无效，请检查后恢复: ${ownerFile}`);
         let alive = true;
-        try { process.kill(owner.pid, 0); } catch (probe) { if (probe.code === 'ESRCH') alive = false; }
+        try { process.kill(owner.pid, 0); } catch (probe) { if (probe.code === 'ESRCH') alive = false; else throw probe; }
         if (!alive) {
             fs.unlinkSync(ownerFile);
             fs.rmdirSync(directory); // Unknown extra content is preserved; never recursive.
@@ -133,16 +132,100 @@ function walk(root, filter = () => true) {
     visit(root, '');
     return files;
 }
+function readHost(project) {
+    const file = path.join(project, 'plugin-dev.host.json');
+    noLinks(project, file);
+    const host = fs.existsSync(file) ? readJson(file) : { schemaVersion: 1, plugins: {} };
+    if (host.schemaVersion !== 1 || !host.plugins || typeof host.plugins !== 'object' || Array.isArray(host.plugins)) fail(`宿主配置格式不支持: ${file}`);
+    for (const [name, reference] of Object.entries(host.plugins)) {
+        validateName(name);
+        if (!reference || typeof reference.source !== 'string' || !reference.source.trim() || typeof reference.enabled !== 'boolean') fail(`宿主插件引用无效: ${name}`);
+    }
+    host.plugins = Object.assign(Object.create(null), host.plugins);
+    return host;
+}
+function sourceInfo(sourcePath, expectedName) {
+    const source = path.resolve(sourcePath);
+    noLinks(path.parse(source).root, source);
+    const file = path.join(source, 'plugin-dev.json');
+    noLinks(source, file);
+    if (!fs.existsSync(file)) fail(`插件源码不存在或缺少 plugin-dev.json: ${source}`);
+    const meta = readJson(file);
+    validateName(meta.name);
+    if (meta.managedBy !== OWNER || ![1, 2].includes(meta.schemaVersion) || (expectedName && meta.name !== expectedName)
+        || (meta.schemaVersion === 1 && typeof meta.enabled !== 'boolean') || (meta.schemaVersion === 2 && Object.hasOwn(meta, 'enabled'))) fail(`插件配置不匹配: ${file}`);
+    return { meta, sourcePath: source, pluginPath: source };
+}
 function pluginInfo(project, name) {
     validateName(name);
-    const pluginPath = path.join(project, 'extensions', name);
-    noLinks(project, pluginPath);
-    const file = path.join(pluginPath, 'plugin-dev.json');
-    noLinks(project, file);
-    if (!fs.existsSync(file)) fail(`未找到由插件开发工具管理的插件: ${name}`);
-    const meta = readJson(file);
-    if (meta.managedBy !== OWNER || meta.schemaVersion !== 1 || meta.name !== name || typeof meta.enabled !== 'boolean') fail(`插件配置不匹配: ${name}`);
-    return { meta, pluginPath, runtimePath: path.join(project, 'assets', '__plugin_dev', name) };
+    const extensionPath = path.join(project, 'extensions', name);
+    noLinks(project, extensionPath);
+    const host = readHost(project);
+    const reference = host.plugins[name];
+    const info = sourceInfo(reference ? path.resolve(project, reference.source) : extensionPath, name);
+    const adapterMissing = !!reference && !fs.existsSync(extensionPath);
+    if (reference) {
+        const marker = path.join(extensionPath, '.plugin-dev-adapter.json');
+        noLinks(project, marker);
+        if (!adapterMissing && !fs.existsSync(marker)) fail(`宿主同名目录不属于开发引用，拒绝接管: ${extensionPath}`);
+    } else if (info.meta.schemaVersion !== 1) fail(`独立插件需要通过“关联宿主”使用: ${info.pluginPath}`);
+    return { ...info, meta: { ...info.meta, enabled: reference ? reference.enabled : info.meta.enabled }, sourceMeta: info.meta,
+        sourceType: reference ? 'local' : 'embedded', extensionPath, host, adapterMissing,
+        runtimePath: path.join(project, 'assets', '__plugin_dev', name) };
+}
+
+function adapterFiles(info, enabled) {
+    const pkg = readJson(path.join(info.pluginPath, 'package.json'));
+    const native = readJson(path.join(info.pluginPath, 'native', 'cc_plugin.json'));
+    if (pkg.name !== info.meta.name || !Array.isArray(native.modules) || !native.modules.length) fail(`插件 package.json 或原生模块声明不匹配: ${info.pluginPath}`);
+    const files = new Map();
+    files.set('package.json', Buffer.from(`${JSON.stringify({ ...pkg, main: './editor/main.js' }, null, 2)}\n`));
+    files.set('editor/main.js', fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').replace(/\{\{NAME\}\}/g, info.meta.name));
+    files.set('editor/plugin-support.cjs', fs.readFileSync(__filename));
+    files.set('native/cc_plugin.json', `${JSON.stringify({ ...native, disabled: !enabled }, null, 2)}\n`);
+    for (const module of native.modules) {
+        if (typeof module.target !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(module.target)) fail(`无效的原生模块 target: ${module.target}`);
+        const config = path.join(info.pluginPath, 'native', 'windows', `${module.target}-config.cmake`);
+        noLinks(info.pluginPath, config);
+        if (!fs.existsSync(config)) fail(`缺少 Windows 模块配置: ${config}`);
+        const normalized = config.replace(/\\/g, '/');
+        let delimiter = '=';
+        while (normalized.includes(`]${delimiter}]`)) delimiter += '=';
+        files.set(`native/windows/${module.target}-config.cmake`, `# Generated host reference; edit the independent plugin source.\ninclude([${delimiter}[${normalized}]${delimiter}])\n`);
+    }
+    return new Map([...files].map(([rel, value]) => [rel, Buffer.isBuffer(value) ? value : Buffer.from(value)]));
+}
+function prepareAdapter(project, info, enabled, initial = false) {
+    const directory = info.extensionPath;
+    const marker = path.join(directory, '.plugin-dev-adapter.json');
+    noLinks(project, marker);
+    let previous = {};
+    if (!initial) {
+        const record = readJson(marker);
+        if (record.schemaVersion !== 1 || record.managedBy !== OWNER || record.name !== info.meta.name || !record.files) fail(`宿主适配目录归属不匹配: ${directory}`);
+        previous = record.files;
+    } else if (fs.existsSync(directory)) fail(`宿主同名扩展已存在，拒绝覆盖: ${directory}`);
+    const desired = adapterFiles(info, enabled);
+    const writes = [], deletes = [], conflicts = [], files = {};
+    for (const [rel, bytes] of desired) files[rel] = hash(bytes);
+    for (const rel of new Set([...Object.keys(previous), ...desired.keys()])) {
+        const file = inside(directory, path.join(directory, rel));
+        noLinks(project, file);
+        if (fs.existsSync(file)) {
+            const actual = hash(fs.readFileSync(file));
+            if (actual !== previous[rel] && actual !== files[rel]) { conflicts.push(file); continue; }
+            if (!desired.has(rel)) deletes.push(file);
+            else if (actual !== files[rel]) writes.push({ dest: file, data: desired.get(rel) });
+        } else if (desired.has(rel)) writes.push({ dest: file, data: desired.get(rel) });
+        else fail(`宿主适配文件已被删除: ${file}`);
+    }
+    if (conflicts.length) fail(`宿主适配文件包含手工修改，请恢复生成文件或合并到独立源码:\n${conflicts.join('\n')}`);
+    return { directory, marker, writes, deletes, record: { schemaVersion: 1, managedBy: OWNER, name: info.meta.name, files } };
+}
+function applyAdapter(plan) {
+    for (const operation of plan.writes) write(operation.dest, operation.data);
+    for (const file of plan.deletes) fs.unlinkSync(file);
+    writeJson(plan.marker, plan.record);
 }
 function nativeFingerprint(pluginPath) {
     const root = path.join(pluginPath, 'native');
@@ -151,9 +234,12 @@ function nativeFingerprint(pluginPath) {
         : !/\.(obj|pdb|ilk|log|tmp)$/.test(item.name) && item.name !== 'CMakeCache.txt' && item.name !== 'compile_commands.json');
     return hash(files.map(rel => `${rel}:${hash(fs.readFileSync(path.join(root, rel)))}`).join('\n'));
 }
-function prepareSync(projectPath, name, enabledOverride) {
+function enabledRuntime(enabled) {
+    return Buffer.from(`// Generated by cocos-plugin-dev. Edit runtime/ sources, not this directory.\nexport const PLUGIN_ENABLED = ${enabled};\n`);
+}
+function prepareSync(projectPath, name, enabledOverride, initialInfo) {
     const project = projectRoot(projectPath);
-    const info = pluginInfo(project, name);
+    const info = initialInfo || pluginInfo(project, name);
     const enabled = enabledOverride === undefined ? info.meta.enabled : enabledOverride;
     if (typeof enabled !== 'boolean') fail('enabled 必须是 boolean。');
     const state = readState(project);
@@ -161,13 +247,14 @@ function prepareSync(projectPath, name, enabledOverride) {
     const previous = state.plugins[name] || {};
     const tracked = previous.tracked || {};
     const source = path.join(info.pluginPath, 'runtime');
-    noLinks(project, source);
+    noLinks(info.pluginPath, source);
+    if (!fs.existsSync(source)) fail(`插件 runtime 目录缺失: ${source}`);
     const desired = {};
     for (const rel of walk(source)) {
         if (rel === 'plugin-enabled.ts') fail('runtime/plugin-enabled.ts 是保留的自动生成文件，请从源码目录移除。');
         desired[rel] = fs.readFileSync(path.join(source, rel));
     }
-    desired['plugin-enabled.ts'] = Buffer.from(`// Generated by cocos-plugin-dev. Edit runtime/ sources, not this directory.\nexport const PLUGIN_ENABLED = ${enabled};\n`);
+    desired['plugin-enabled.ts'] = enabledRuntime(enabled);
     const writes = [];
     const deletes = [];
     const conflicts = [];
@@ -197,13 +284,15 @@ function prepareSync(projectPath, name, enabledOverride) {
         else deletes.push(dest);
     }
     if (conflicts.length) fail(`同步冲突，保留了项目中手工修改的文件。请先把修改合并回插件 runtime/，或备份并删除冲突副本，再同步:\n${conflicts.join('\n')}`);
-    const nativeFile = path.join(info.pluginPath, 'native', 'cc_plugin.json');
-    noLinks(project, nativeFile);
+    const createAdapter = !!initialInfo || info.adapterMissing;
+    const nativeFile = path.join(info.sourceType === 'local' && !createAdapter ? info.extensionPath : info.pluginPath, 'native', 'cc_plugin.json');
+    noLinks(path.parse(nativeFile).root, nativeFile);
     const native = readJson(nativeFile);
     // Inspect the whole native source tree before any mutation, so an unsupported
     // linked dependency cannot cause an enable operation to fail halfway through.
     nativeFingerprint(info.pluginPath);
-    return { project, info, enabled, state, previous, nextTracked, writes, deletes, nativeFile, native };
+    const adapter = info.sourceType === 'local' ? prepareAdapter(project, info, enabled, createAdapter) : undefined;
+    return { project, info, enabled, state, previous, nextTracked, writes, deletes, nativeFile, native, adapter };
 }
 function applySync(plan) {
     const { project, info, enabled, state, previous } = plan;
@@ -214,13 +303,19 @@ function applySync(plan) {
     const enableChanged = info.meta.enabled !== enabled || plan.native.disabled !== !enabled;
     info.meta.enabled = enabled;
     plan.native.disabled = !enabled;
-    writeJson(path.join(info.pluginPath, 'plugin-dev.json'), info.meta);
-    writeJson(plan.nativeFile, plan.native);
+    if (info.sourceType === 'local') {
+        applyAdapter(plan.adapter);
+        info.host.plugins[info.meta.name].enabled = enabled;
+        writeJson(path.join(project, 'plugin-dev.host.json'), info.host);
+    } else {
+        writeJson(path.join(info.pluginPath, 'plugin-dev.json'), info.meta);
+        writeJson(plan.nativeFile, plan.native);
+    }
     const fingerprint = nativeFingerprint(info.pluginPath);
     const assetsChanged = enableChanged || plan.writes.length > 0 || plan.deletes.length > 0;
     state.plugins[info.meta.name] = {
-        ...previous, enabled, template: info.meta.template, target: info.meta.target,
-        needsRebuild: previous.needsRebuild !== false || assetsChanged || previous.nativeFingerprint !== fingerprint,
+        ...previous, enabled, template: info.meta.template, target: info.meta.target, sourcePath: info.pluginPath, detached: false,
+        needsRebuild: previous.needsRebuild !== false || assetsChanged || info.adapterMissing || previous.nativeFingerprint !== fingerprint || previous.sourcePath !== info.pluginPath,
         assetsDirty: previous.assetsDirty !== false || assetsChanged,
         nativeFingerprint: fingerprint,
         lastSync: new Date().toISOString(), tracked: plan.nextTracked,
@@ -228,7 +323,7 @@ function applySync(plan) {
     writeJson(path.join(project, '.plugin-dev', 'state.json'), state);
     return {
         name: info.meta.name, displayName: info.meta.displayName, enabled, template: info.meta.template,
-        target: info.meta.target, pluginPath: info.pluginPath, runtimePath: info.runtimePath,
+        target: info.meta.target, pluginPath: info.pluginPath, sourcePath: info.sourcePath, extensionPath: info.extensionPath, sourceType: info.sourceType, runtimePath: info.runtimePath,
         needsRebuild: state.plugins[info.meta.name].needsRebuild,
         assetsDirty: state.plugins[info.meta.name].assetsDirty,
         copied: plan.writes.length, removed: plan.deletes.length,
@@ -243,4 +338,4 @@ function setEnabled({ projectPath, name, enabled }) {
     const project = projectRoot(projectPath);
     return withProjectLock(project, () => applySync(prepareSync(project, name, enabled)));
 }
-module.exports = { OWNER, validateName, inside, noLinks, projectRoot, readJson, write, writeJson, ensureLocalIgnore, withProjectLock, readState, walk, pluginInfo, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };
+module.exports = { OWNER, validateName, inside, noLinks, projectRoot, readJson, write, writeJson, hash, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };

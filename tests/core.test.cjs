@@ -7,6 +7,9 @@ const os = require('node:os');
 const path = require('node:path');
 const { execFileSync, execFile } = require('node:child_process');
 const { promisify } = require('node:util');
+const vm = require('node:vm');
+const { createRequire } = require('node:module');
+const { EventEmitter } = require('node:events');
 const core = require('../lib/core.cjs');
 
 function fixture(t) {
@@ -255,4 +258,280 @@ test('tool install supports owned upgrades and refuses unrelated or edited files
     const other = project('unrelated');
     put(path.join(other, 'extensions/cocos-plugin-dev/package.json'), '{"name":"unrelated"}');
     assert.throws(() => core.installTools({ projectPath: other, sourcePath: source }), /不属于/);
+});
+
+test('standalone plugin creation needs no game and contains no host state', t => {
+    const { root } = fixture(t);
+    const pluginPath = path.join(root, 'plugin-repository');
+    const created = core.createPlugin({ pluginPath, name: 'independent-render', template: 'render' });
+    assert.equal(created.pluginPath, pluginPath);
+    assert.equal(created.standalone, true);
+    const descriptor = readJson(path.join(pluginPath, 'plugin-dev.json'));
+    assert.equal(descriptor.schemaVersion, 2);
+    assert.equal(Object.hasOwn(descriptor, 'enabled'), false);
+    assert.equal(fs.existsSync(path.join(pluginPath, 'plugin-dev.host.json')), false);
+    assert.equal(fs.existsSync(path.join(pluginPath, '.plugin-dev')), false);
+    assert.match(fs.readFileSync(path.join(pluginPath, '.gitignore'), 'utf8'), /CMakeCache\.txt/);
+    assert.throws(() => core.createPlugin({ name: 'no-location' }), /pluginPath/);
+});
+
+test('two hosts compile original sources and maintain independent enable and import state', t => {
+    const { root, projectPath, project } = fixture(t);
+    const pluginPath = path.join(root, 'shared source');
+    const created = core.createPlugin({ pluginPath, name: 'shared-runtime', projectPath });
+    const second = project('second-game');
+    const linked = core.linkPlugin({ projectPath: second, sourcePath: pluginPath });
+    assert.equal(linked.sourceType, 'local');
+    assert.equal(created.pluginPath, linked.pluginPath);
+    assert.notEqual(created.extensionPath, linked.extensionPath);
+    assert.equal(readJson(path.join(projectPath, 'plugin-dev.host.json')).plugins['shared-runtime'].source, '../shared source');
+    const sourceBefore = fs.readFileSync(path.join(pluginPath, 'plugin-dev.json'), 'utf8');
+    const nativeBefore = fs.readFileSync(path.join(pluginPath, 'native/cc_plugin.json'), 'utf8');
+    core.setEnabled({ projectPath, name: 'shared-runtime', enabled: false });
+    assert.equal(core.listPlugins({ projectPath })[0].enabled, false);
+    assert.equal(core.listPlugins({ projectPath: second })[0].enabled, true);
+    assert.equal(readJson(path.join(created.extensionPath, 'native/cc_plugin.json')).disabled, true);
+    assert.equal(readJson(path.join(linked.extensionPath, 'native/cc_plugin.json')).disabled, false);
+    assert.equal(fs.readFileSync(path.join(pluginPath, 'plugin-dev.json'), 'utf8'), sourceBefore);
+    assert.equal(fs.readFileSync(path.join(pluginPath, 'native/cc_plugin.json'), 'utf8'), nativeBefore);
+    const config = fs.readFileSync(path.join(created.extensionPath, `native/windows/${created.target}-config.cmake`), 'utf8');
+    assert.ok(config.includes(path.join(pluginPath, `native/windows/${created.target}-config.cmake`).replace(/\\/g, '/')));
+    assert.equal(fs.existsSync(path.join(created.extensionPath, 'native/src')), false);
+    fs.appendFileSync(path.join(pluginPath, 'runtime/index.ts'), '\n// one source, two hosts\n');
+    // The adapter ships its own sync implementation and needs no workbench at runtime.
+    const adapter = require(path.join(linked.extensionPath, 'editor/plugin-support.cjs'));
+    adapter.syncPlugin({ projectPath: second, name: 'shared-runtime' });
+    core.syncPlugin({ projectPath, name: 'shared-runtime' });
+    for (const item of [created, linked]) assert.match(fs.readFileSync(path.join(item.runtimePath, 'index.ts'), 'utf8'), /one source, two hosts/);
+    assert.match(fs.readFileSync(path.join(created.runtimePath, 'plugin-enabled.ts'), 'utf8'), /= false/);
+    assert.match(fs.readFileSync(path.join(linked.runtimePath, 'plugin-enabled.ts'), 'utf8'), /= true/);
+});
+
+test('unlink retains imported assets and UUIDs, relink restores the same source with independent state', t => {
+    const { root, projectPath } = fixture(t);
+    const pluginPath = path.join(root, 'reusable');
+    const plugin = core.createPlugin({ pluginPath, projectPath, name: 'reusable' });
+    const metadata = path.join(plugin.runtimePath, 'PluginProbe.ts.meta');
+    put(metadata, '{"uuid":"existing-scene-component"}');
+    const result = core.unlinkPlugin({ projectPath, name: 'reusable' });
+    assert.equal(result.detached, true);
+    assert.equal(result.pluginPath, pluginPath);
+    assert.equal(fs.existsSync(plugin.extensionPath), false);
+    assert.equal(fs.existsSync(path.join(pluginPath, 'native/src/PluginEntry.cpp')), true);
+    assert.equal(readJson(metadata).uuid, 'existing-scene-component');
+    assert.match(fs.readFileSync(path.join(plugin.runtimePath, 'plugin-enabled.ts'), 'utf8'), /= false/);
+    assert.equal(readJson(path.join(projectPath, 'plugin-dev.host.json')).plugins.reusable, undefined);
+    assert.deepEqual(core.listPlugins({ projectPath }), []);
+    const record = readJson(path.join(projectPath, '.plugin-dev/state.json')).plugins.reusable;
+    assert.equal(record.detached, true);
+    assert.equal(record.needsRebuild, true);
+    assert.equal(record.assetsDirty, true);
+    core.linkPlugin({ projectPath, sourcePath: pluginPath });
+    assert.equal(core.listPlugins({ projectPath })[0].enabled, true);
+    assert.equal(readJson(metadata).uuid, 'existing-scene-component');
+    assert.match(fs.readFileSync(path.join(plugin.runtimePath, 'plugin-enabled.ts'), 'utf8'), /= true/);
+});
+
+test('external source, adapter and runtime errors remain visible and preserve existing files', t => {
+    const { root, projectPath } = fixture(t);
+    const pluginPath = path.join(root, 'external');
+    const plugin = core.createPlugin({ pluginPath, projectPath, name: 'external' });
+    const config = path.join(plugin.extensionPath, `native/windows/${plugin.target}-config.cmake`);
+    const original = fs.readFileSync(config);
+    fs.appendFileSync(config, '\n# hand edit\n');
+    assert.throws(() => core.syncPlugin({ projectPath, name: 'external' }), /宿主适配文件包含手工修改/);
+    assert.throws(() => core.unlinkPlugin({ projectPath, name: 'external' }), /手工修改/);
+    assert.equal(readJson(path.join(projectPath, 'plugin-dev.host.json')).plugins.external.enabled, true);
+    put(config, original);
+    fs.appendFileSync(path.join(plugin.runtimePath, 'index.ts'), '\n// conflict\n');
+    assert.throws(() => core.setEnabled({ projectPath, name: 'external', enabled: false }), /同步冲突/);
+    assert.equal(readJson(path.join(projectPath, 'plugin-dev.host.json')).plugins.external.enabled, true);
+    const moved = `${pluginPath}-moved`;
+    fs.renameSync(pluginPath, moved);
+    assert.throws(() => core.listPlugins({ projectPath }), /源码不存在/);
+    assert.throws(() => core.syncPlugin({ projectPath, name: 'external' }), /源码不存在/);
+    assert.ok(fs.existsSync(plugin.extensionPath));
+});
+
+test('host reference rejects collisions, nesting and linked directories before generating adapters', t => {
+    const { root, projectPath, project } = fixture(t);
+    const source = path.join(root, 'collision-source');
+    core.createPlugin({ pluginPath: source, name: 'collision' });
+    const occupied = path.join(projectPath, 'extensions/collision');
+    put(path.join(occupied, 'user.txt'), 'keep');
+    assert.throws(() => core.linkPlugin({ projectPath, sourcePath: source }), /拒绝覆盖/);
+    assert.equal(fs.existsSync(path.join(projectPath, 'plugin-dev.host.json')), false);
+    assert.equal(fs.readFileSync(path.join(occupied, 'user.txt'), 'utf8'), 'keep');
+    assert.throws(() => core.createPlugin({ projectPath, pluginPath: path.join(projectPath, 'my-plugin'), name: 'nested' }), /互不包含/);
+    assert.equal(fs.existsSync(path.join(projectPath, 'my-plugin')), false);
+    const junction = path.join(root, 'linked-source');
+    fs.symlinkSync(source, junction, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => core.linkPlugin({ projectPath: project('junction-host'), sourcePath: junction }), /符号链接|目录联接/);
+    const embedded = core.createPlugin({ projectPath: project('embedded-host'), name: 'embedded' });
+    assert.throws(() => core.unlinkPlugin({ projectPath: path.dirname(path.dirname(embedded.pluginPath)), name: 'embedded' }), /内嵌插件/);
+});
+
+test('host manifest edits are reflected as pending build and source enable remains unchanged', t => {
+    const { root, projectPath } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'manual-host'), projectPath, name: 'manual-host' });
+    const stateFile = path.join(projectPath, '.plugin-dev/state.json');
+    const state = readJson(stateFile);
+    state.plugins['manual-host'].needsRebuild = false;
+    state.plugins['manual-host'].assetsDirty = false;
+    put(stateFile, JSON.stringify(state));
+    const hostFile = path.join(projectPath, 'plugin-dev.host.json');
+    const host = readJson(hostFile);
+    host.plugins['manual-host'].enabled = false;
+    put(hostFile, JSON.stringify(host));
+    const listed = core.listPlugins({ projectPath })[0];
+    assert.equal(listed.enabled, false);
+    assert.equal(listed.needsRebuild, true);
+    assert.equal(listed.assetsDirty, true);
+    core.syncPlugin({ projectPath, name: 'manual-host' });
+    assert.equal(readJson(path.join(plugin.extensionPath, 'native/cc_plugin.json')).disabled, true);
+    assert.equal(Object.hasOwn(readJson(path.join(plugin.pluginPath, 'plugin-dev.json')), 'enabled'), false);
+});
+
+test('packaging an independent plugin produces a portable embedded extension without host paths', t => {
+    const { root, projectPath, project } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'package-source'), projectPath, name: 'package-source' });
+    core.setEnabled({ projectPath, name: 'package-source', enabled: false });
+    const packaged = core.packagePlugin({ projectPath, name: 'package-source' });
+    const descriptor = readJson(path.join(packaged.packagePath, 'plugin-dev.json'));
+    assert.equal(descriptor.schemaVersion, 1);
+    assert.equal(descriptor.enabled, true);
+    assert.equal(fs.existsSync(path.join(packaged.packagePath, '.plugin-dev-adapter.json')), false);
+    assert.equal(fs.existsSync(path.join(packaged.packagePath, 'plugin-dev.host.json')), false);
+    assert.equal(Object.hasOwn(readJson(path.join(plugin.pluginPath, 'plugin-dev.json')), 'enabled'), false);
+    const target = project('package-game');
+    const destination = path.join(target, 'extensions/package-source');
+    fs.cpSync(packaged.packagePath, destination, { recursive: true });
+    require(path.join(destination, 'editor/plugin-support.cjs')).syncPlugin({ projectPath: target, name: 'package-source' });
+    assert.equal(core.listPlugins({ projectPath: target })[0].sourceType, 'embedded');
+});
+
+test('checked-in host references restore absent adapters and repeated link preserves host enable state', t => {
+    const { root, projectPath } = fixture(t);
+    const sourcePath = path.join(root, 'restorable');
+    const created = core.createPlugin({ pluginPath: sourcePath, projectPath, name: 'restorable' });
+    core.setEnabled({ projectPath, name: 'restorable', enabled: false });
+    const sourceBefore = fs.readFileSync(path.join(sourcePath, 'plugin-dev.json'));
+    const flagBefore = fs.readFileSync(path.join(created.runtimePath, 'plugin-enabled.ts'));
+    fs.rmSync(created.extensionPath, { recursive: true });
+    assert.equal(core.listPlugins({ projectPath })[0].needsRebuild, true);
+    core.syncPlugin({ projectPath, name: 'restorable' });
+    assert.equal(readJson(path.join(created.extensionPath, 'native/cc_plugin.json')).disabled, true);
+    fs.rmSync(created.extensionPath, { recursive: true });
+    const linked = core.linkPlugin({ projectPath, sourcePath });
+    assert.equal(linked.enabled, false);
+    assert.deepEqual(fs.readFileSync(path.join(created.runtimePath, 'plugin-enabled.ts')), flagBefore);
+    assert.deepEqual(fs.readFileSync(path.join(sourcePath, 'plugin-dev.json')), sourceBefore);
+    fs.rmSync(created.extensionPath, { recursive: true });
+    put(path.join(created.extensionPath, 'unrelated.txt'), 'do not take over');
+    assert.throws(() => core.syncPlugin({ projectPath, name: 'restorable' }), /拒绝接管/);
+    assert.equal(fs.readFileSync(path.join(created.extensionPath, 'unrelated.txt'), 'utf8'), 'do not take over');
+});
+
+test('unlink can remove a missing source reference without deleting imported assets', t => {
+    const { root, projectPath } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'moved-source'), projectPath, name: 'moved-source' });
+    put(path.join(plugin.runtimePath, 'PluginProbe.ts.meta'), '{"uuid":"keep-on-detach"}');
+    fs.renameSync(plugin.pluginPath, `${plugin.pluginPath}-new-location`);
+    assert.throws(() => core.listPlugins({ projectPath }), /源码不存在/);
+    const result = core.unlinkPlugin({ projectPath, name: 'moved-source' });
+    assert.equal(result.detached, true);
+    assert.equal(fs.existsSync(plugin.extensionPath), false);
+    assert.equal(readJson(path.join(plugin.runtimePath, 'PluginProbe.ts.meta')).uuid, 'keep-on-detach');
+    assert.match(fs.readFileSync(path.join(plugin.runtimePath, 'plugin-enabled.ts'), 'utf8'), /= false/);
+    assert.deepEqual(core.listPlugins({ projectPath }), []);
+});
+
+test('orphaned host adapters are reported instead of silently remaining in native builds', t => {
+    const { root, projectPath } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'orphan-source'), projectPath, name: 'orphan-source' });
+    fs.unlinkSync(path.join(projectPath, 'plugin-dev.host.json'));
+    assert.throws(() => core.listPlugins({ projectPath }), /缺少 plugin-dev.host.json 引用/);
+    assert.ok(fs.existsSync(path.join(plugin.extensionPath, 'native/cc_plugin.json')));
+});
+
+test('diagnostic listing exposes a broken local reference without hiding strict build failures', t => {
+    const { root, projectPath } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'diagnostic-source'), projectPath, name: 'diagnostic-source' });
+    fs.renameSync(plugin.pluginPath, `${plugin.pluginPath}-moved`);
+    assert.throws(() => core.listPlugins({ projectPath }), /源码不存在/);
+    const [diagnostic] = core.listPlugins({ projectPath, includeErrors: true });
+    assert.equal(diagnostic.name, 'diagnostic-source');
+    assert.equal(diagnostic.sourcePath, plugin.pluginPath);
+    assert.equal(diagnostic.extensionPath, plugin.extensionPath);
+    assert.equal(diagnostic.enabled, true);
+    assert.match(diagnostic.error, /源码不存在/);
+    put(path.join(projectPath, 'plugin-dev.host.json'), '{"schemaVersion":99}');
+    assert.throws(() => core.listPlugins({ projectPath, includeErrors: true }), /配置格式/);
+});
+
+test('external editor watcher auto-syncs, retargets source references and exposes synchronization failures', async t => {
+    const { root, projectPath } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'watched-source'), projectPath, name: 'watched-source' });
+    const nextSource = path.join(root, 'retargeted-source');
+    core.createPlugin({ pluginPath: nextSource, name: 'watched-source' });
+    const file = path.join(plugin.extensionPath, 'editor/main.js');
+    const exports = {};
+    const failures = [];
+    const refreshes = [];
+    vm.runInNewContext(fs.readFileSync(file, 'utf8'), { exports, require: createRequire(file), __dirname: path.dirname(file),
+        setTimeout, clearTimeout, console: { error: (...args) => failures.push(args.join(' ')) },
+        Editor: { Project: { path: projectPath }, Message: { request: async (...args) => refreshes.push(args) } },
+    }, { filename: file });
+    t.after(() => exports.unload());
+    const until = async predicate => {
+        const limit = Date.now() + 5000;
+        while (!predicate()) {
+            if (Date.now() >= limit) throw new Error(`Watcher did not reach expected state; reported errors: ${failures.join('\n')}`);
+            await new Promise(resolve => setTimeout(resolve, 30));
+        }
+    };
+    await exports.load();
+    const mirror = path.join(plugin.runtimePath, 'index.ts');
+    fs.appendFileSync(path.join(plugin.pluginPath, 'runtime/index.ts'), '\n// watch first source\n');
+    await until(() => fs.readFileSync(mirror, 'utf8').includes('watch first source'));
+    const hostFile = path.join(projectPath, 'plugin-dev.host.json');
+    const host = readJson(hostFile);
+    host.plugins['watched-source'].source = '../retargeted-source';
+    put(hostFile, JSON.stringify(host));
+    await until(() => !fs.readFileSync(mirror, 'utf8').includes('watch first source'));
+    fs.appendFileSync(path.join(nextSource, 'runtime/index.ts'), '\n// watch second source\n');
+    await until(() => fs.readFileSync(mirror, 'utf8').includes('watch second source'));
+    fs.appendFileSync(mirror, '\n// user conflict\n');
+    fs.appendFileSync(path.join(nextSource, 'runtime/index.ts'), '\n// surface sync failure\n');
+    await until(() => failures.some(message => message.includes('同步冲突')));
+    assert.ok(refreshes.some(args => args[0] === 'asset-db' && args[1] === 'refresh-asset'));
+    assert.match(fs.readFileSync(mirror, 'utf8'), /user conflict/);
+    assert.doesNotMatch(fs.readFileSync(mirror, 'utf8'), /surface sync failure/);
+    fs.renameSync(path.join(nextSource, 'runtime'), path.join(nextSource, 'runtime-removed'));
+    await until(() => failures.some(message => message.includes('runtime 目录缺失')));
+});
+
+test('watcher setup failure closes already opened source watchers and rejects extension load', async t => {
+    const { root, projectPath } = fixture(t);
+    const plugin = core.createPlugin({ pluginPath: path.join(root, 'watch-failure'), projectPath, name: 'watch-failure' });
+    const file = path.join(plugin.extensionPath, 'editor/main.js');
+    const requireFromPlugin = createRequire(file);
+    const exports = {};
+    let watchCalls = 0;
+    let closed = 0;
+    const fakeFs = { ...fs, watch() {
+        if (++watchCalls === 2) throw new Error('Host watcher permission denied');
+        const watcher = new EventEmitter();
+        watcher.close = () => closed++;
+        return watcher;
+    } };
+    vm.runInNewContext(fs.readFileSync(file, 'utf8'), { exports, require: id => id === 'node:fs' ? fakeFs : requireFromPlugin(id),
+        setTimeout, clearTimeout, console,
+        Editor: { Project: { path: projectPath }, Message: { request: async () => {} } },
+    }, { filename: file });
+    await assert.rejects(exports.load(), /Host watcher permission denied/);
+    assert.equal(watchCalls, 2);
+    assert.equal(closed, 1);
+    exports.unload();
+    assert.equal(closed, 1);
 });

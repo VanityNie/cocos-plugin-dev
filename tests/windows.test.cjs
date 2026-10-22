@@ -104,6 +104,41 @@ test('workspace uses actual executable, a process task, native debugger and sepa
     assert.ok(ws.settings['clangd.arguments'][0].includes('build'));
 });
 
+test('two host workspaces use shared original source and separate compile databases', t => {
+    const { root, file } = fixture(t);
+    const source = path.join(root, 'shared-plugin');
+    file('shared-plugin/runtime/index.ts', 'export const shared = true;');
+    file('shared-plugin/.clangd', 'User configuration');
+    const plugins = [{ name: 'shared-plugin', sourceType: 'local', sourcePath: source }];
+    for (const name of ['host-a', 'host-b']) {
+        const project = path.join(root, name);
+        const buildDir = path.join(project, '.plugin-dev/build/windows');
+        const ws = internal.workspaceData({ buildDir }, project, 'cli.cjs', process.execPath, 6086, plugins);
+        assert.equal(ws.folders.find(folder => folder.name === 'Plugin: shared-plugin').path, source);
+        assert.equal(ws.settings['clangd.arguments'][0], `--compile-commands-dir=${buildDir.replace(/\\/g, '/')}`);
+        const mirror = path.join(project, 'assets/__plugin_dev/shared-plugin/index.ts').replace(/\\/g, '/');
+        const mapping = ws.launch.configurations[1].sourceMapPathOverrides;
+        assert.equal(mapping[`*${mirror}`], path.join(source, 'runtime/index.ts').replace(/\\/g, '/'));
+        assert.equal(Object.keys(mapping).some(key => key.endsWith('/plugin-enabled.ts')), false);
+    }
+    assert.equal(fs.readFileSync(path.join(source, '.clangd'), 'utf8'), 'User configuration');
+});
+
+test('detaching a plugin prevents running the old executable until assets and native build finish', async t => {
+    const { root, file } = fixture(t);
+    const executable = file('build/Game.exe', 'placeholder, must never launch');
+    file('.plugin-dev/windows.json', { builtAt: 'previous', executable });
+    const removed = { detached: true, enabled: false, needsRebuild: true, assetsDirty: true, tracked: {} };
+    file('.plugin-dev/state.json', { schemaVersion: 1, plugins: { removed } });
+    await assert.rejects(windows.run({ projectPath: root }), /Plugins changed.*removed/);
+    internal.acknowledgePlugins(root, { removed }, 'assetsDirty');
+    await assert.rejects(windows.run({ projectPath: root }), /Plugins changed.*removed/);
+    internal.acknowledgePlugins(root, { removed }, 'needsRebuild', true);
+    const records = JSON.parse(fs.readFileSync(path.join(root, '.plugin-dev/state.json'), 'utf8')).plugins;
+    assert.equal(records.removed.needsRebuild, false);
+    assert.equal(records.removed.assetsDirty, false);
+});
+
 test('debug workspace never changes the project .vscode or native compile database', async (t) => {
     const { root, file } = fixture(t);
     file('.vscode/launch.json', 'user debugging');
@@ -132,6 +167,19 @@ test('build acknowledgements preserve edits made while the compiler was running'
     const result = JSON.parse(fs.readFileSync(path.join(root, '.plugin-dev/state.json'), 'utf8'));
     assert.equal(result.plugins.stable.needsRebuild, false);
     assert.equal(result.plugins.edited.needsRebuild, true);
+});
+
+test('build acknowledgements do not erase a source relocation or detach during the build', t => {
+    const { root, file } = fixture(t);
+    const record = { enabled: true, tracked: {}, nativeFingerprint: 'same-content', sourcePath: 'E:/plugins/old', needsRebuild: true };
+    const snapshot = { moved: { ...record }, removed: { ...record } };
+    file('.plugin-dev/state.json', { schemaVersion: 1, plugins: {
+        moved: { ...record, sourcePath: 'E:/plugins/new' }, removed: { ...record, detached: true },
+    } });
+    internal.acknowledgePlugins(root, snapshot, 'needsRebuild', true);
+    const records = JSON.parse(fs.readFileSync(path.join(root, '.plugin-dev/state.json'), 'utf8')).plugins;
+    assert.equal(records.moved.needsRebuild, true);
+    assert.equal(records.removed.needsRebuild, true);
 });
 
 test('MSVC encoding probe distinguishes UTF-8 and GBK localized include prefixes', () => {

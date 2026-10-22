@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 const PACKAGE_NAME = 'cocos-plugin-dev';
 const labels = {
-    create: '创建插件', enable: '更新插件状态', sync: '同步运行时文件', package: '打包插件',
+    create: '创建插件', link: '添加开发引用', unlink: '解除开发引用', enable: '更新插件状态', sync: '同步运行时文件', package: '打包插件',
     doctor: '检查环境', prepare: '准备 Windows 宿主', configure: '配置原生构建',
     build: '编译 Windows 宿主', run: '启动游戏', 'build-run': '构建并运行', debug: '生成调试工作区',
     stop: '停止游戏', restart: '重启游戏',
@@ -95,6 +95,7 @@ async function start(panel, action, input = {}) {
     notice(panel, '');
     try {
         await request('save-settings', settings(panel));
+        panel._cancelRequested = false;
         const task = await request('start-task', action, { ...input, refreshAssets: query(panel, '#refresh-assets').checked });
         if (panel._closed) return;
         query(panel, '#log').textContent = '';
@@ -132,19 +133,26 @@ function renderPlugins(panel, plugins) {
     const document = container.ownerDocument;
     query(panel, '#plugin-count').textContent = `${plugins.length} 个插件`;
     if (!plugins.length) {
-        container.appendChild(textElement(document, 'p', '还没有工作台插件。创建第一个 TS + C++ 插件开始开发。', 'empty'));
+        container.appendChild(textElement(document, 'p', '此宿主还没有工作台插件。创建插件或添加已有源码的开发引用。', 'empty'));
         return;
     }
     for (const plugin of plugins) {
         const row = textElement(document, 'article', '', 'plugin');
         const info = textElement(document, 'div', '');
         info.appendChild(textElement(document, 'div', plugin.displayName || plugin.name, 'plugin-name'));
-        info.appendChild(textElement(document, 'div', `${plugin.name} · ${plugin.template === 'render' ? '渲染扩展' : '原生能力'}`, 'plugin-meta'));
-        const state = `${plugin.enabled ? '已启用' : '已禁用'}${plugin.needsRebuild ? ' · 待重新构建' : ''}`;
-        info.appendChild(textElement(document, 'div', state, `plugin-meta ${plugin.enabled ? 'enabled' : 'disabled'}`));
+        if (!plugin.error) info.appendChild(textElement(document, 'div', `${plugin.name} · ${plugin.template === 'render' ? '渲染扩展' : '原生能力'}`, 'plugin-meta'));
+        info.appendChild(textElement(document, 'div', `${plugin.sourceType === 'local' ? '独立源码' : '宿主内源码'}：${plugin.pluginPath}`, 'plugin-meta plugin-source'));
+        if (plugin.error) {
+            info.appendChild(textElement(document, 'div', `开发引用无效：${plugin.error}`, 'plugin-meta plugin-error'));
+        } else {
+            const state = `${plugin.enabled ? '已启用' : '已禁用'}${plugin.needsRebuild ? ' · 待重新构建' : ''}`;
+            info.appendChild(textElement(document, 'div', state, `plugin-meta ${plugin.enabled ? 'enabled' : 'disabled'}`));
+        }
         row.appendChild(info);
         const actions = textElement(document, 'div', '', 'plugin-actions');
-        for (const [action, title] of [['enable', plugin.enabled ? '禁用' : '启用'], ['source', '打开源码'], ['sync', '同步'], ['package', '打包']]) {
+        const operations = plugin.error ? [] : [['enable', plugin.enabled ? '禁用' : '启用'], ['source', '打开源码'], ['sync', '同步'], ['package', '打包']];
+        if (plugin.sourceType === 'local') operations.push(['unlink', '解除引用']);
+        for (const [action, title] of operations) {
             const button = textElement(document, 'button', title);
             button.type = 'button';
             if (action !== 'source') button.setAttribute('data-mutation', '');
@@ -162,28 +170,79 @@ function renderPlugins(panel, plugins) {
     busy(panel, panel._busy);
 }
 
+function applyContext(panel, context, restoreTask) {
+    panel._editorProjectPath = context.editorProjectPath;
+    query(panel, '#editor-project-path').textContent = context.editorProjectPath;
+    query(panel, '#project-path').textContent = context.projectPath;
+    query(panel, '#host-path').value = context.projectPath;
+    query(panel, '#host-note').textContent = context.isEditorHost
+        ? '当前操作作用于已打开的项目。添加引用后自动加载源码监视，资源构建使用当前编辑器。'
+        : '当前操作作用于所选宿主，不会切换当前编辑器。资源构建前请保存并关闭该宿主的其他 Creator 窗口；打开该宿主并启用插件后启动源码监视。';
+    const changedHost = panel._projectPath !== context.projectPath;
+    panel._projectPath = context.projectPath;
+    if (!panel._settingsLoaded || changedHost) {
+        query(panel, '#engine-path').value = context.settings.enginePath || '';
+        query(panel, '#creator-path').value = context.settings.creatorPath || '';
+        query(panel, '#output-dir').value = context.settings.outputDir || '';
+        query(panel, '#settings-details').open = !context.settings.enginePath;
+        panel._settingsLoaded = true;
+    }
+    const engineError = query(panel, '#engine-error');
+    engineError.textContent = context.engineError || '';
+    engineError.hidden = !context.engineError;
+    renderPlugins(panel, context.plugins);
+    if (restoreTask && context.task) {
+        query(panel, '#log').textContent = '';
+        panel._sequence = 0;
+        showTask(panel, context.task);
+        if (isPending(context.task)) schedulePoll(panel);
+    } else if (restoreTask) {
+        busy(panel, false);
+        if (changedHost) {
+            clearTimeout(panel._timer);
+            panel._task = null;
+            panel._sequence = 0;
+            query(panel, '#task-status').textContent = '就绪';
+            query(panel, '#task-status').className = 'status';
+            query(panel, '#task-detail').textContent = '操作将作用于上方所选宿主。';
+            query(panel, '#cancel-task').hidden = true;
+            query(panel, '#log').textContent = '';
+        }
+    }
+}
+
 async function refresh(panel, restoreTask = true) {
     try {
         const context = await request('get-context');
         if (panel._closed) return;
-        query(panel, '#project-path').textContent = context.projectPath;
-        if (!panel._settingsLoaded) {
-            query(panel, '#engine-path').value = context.settings.enginePath || '';
-            query(panel, '#creator-path').value = context.settings.creatorPath || '';
-            query(panel, '#output-dir').value = context.settings.outputDir || '';
-            query(panel, '#settings-details').open = !context.settings.enginePath;
-            panel._settingsLoaded = true;
-        }
-        renderPlugins(panel, context.plugins);
-        if (restoreTask && context.task) {
-            query(panel, '#log').textContent = '';
-            panel._sequence = 0;
-            showTask(panel, context.task);
-            if (isPending(context.task)) schedulePoll(panel);
-        } else if (restoreTask) busy(panel, false);
+        applyContext(panel, context, restoreTask);
     } catch (error) {
         if (!panel._closed) notice(panel, error.message || String(error));
     }
+}
+
+async function selectHost(panel, host) {
+    if (panel._busy) return;
+    busy(panel, true);
+    notice(panel, '');
+    try {
+        const context = await request('select-host', host);
+        if (panel._closed) return;
+        applyContext(panel, context, true);
+    } catch (error) {
+        if (!panel._closed) { busy(panel, false); notice(panel, error.message); }
+    }
+}
+
+async function chooseDirectory(panel, selector, parent = false) {
+    if (panel._busy) return;
+    const name = query(panel, '#plugin-name').value.trim();
+    if (parent && !name) { notice(panel, '请先填写插件标识，再选择上级目录。'); return; }
+    try {
+        const input = query(panel, selector);
+        const directory = await request('choose-directory', parent ? path.dirname(input.value || panel._projectPath) : input.value);
+        if (!panel._closed && directory) input.value = parent ? path.join(directory, name) : directory;
+    } catch (error) { if (!panel._closed) notice(panel, error.message); }
 }
 
 module.exports = Editor.Panel.define({
@@ -198,6 +257,19 @@ module.exports = Editor.Panel.define({
         this._cancelRequested = false;
         query(this, '#refresh').addEventListener('click', () => refresh(this));
         query(this, '#cancel-task').addEventListener('click', () => cancel(this));
+        query(this, '#host-form').addEventListener('submit', (event) => {
+            event.preventDefault();
+            selectHost(this, query(this, '#host-path').value.trim());
+        });
+        query(this, '#use-editor-host').addEventListener('click', () => selectHost(this, this._editorProjectPath));
+        query(this, '#browse-host').addEventListener('click', () => chooseDirectory(this, '#host-path'));
+        query(this, '#browse-source').addEventListener('click', () => chooseDirectory(this, '#source-path'));
+        query(this, '#browse-plugin-parent').addEventListener('click', () => chooseDirectory(this, '#plugin-path', true));
+        query(this, '#plugin-location').addEventListener('change', () => {
+            const independent = query(this, '#plugin-location').value === 'independent';
+            query(this, '#independent-location').hidden = !independent;
+            query(this, '#plugin-path').required = independent;
+        });
         query(this, '#save-settings').addEventListener('click', async () => {
             try {
                 await request('save-settings', settings(this));
@@ -206,11 +278,19 @@ module.exports = Editor.Panel.define({
         });
         query(this, '#create-form').addEventListener('submit', (event) => {
             event.preventDefault();
+            const independent = query(this, '#plugin-location').value === 'independent';
+            const pluginPath = query(this, '#plugin-path').value.trim();
+            if (independent && !pluginPath) { notice(this, '请填写独立插件的新建目录。'); return; }
             start(this, 'create', {
                 name: query(this, '#plugin-name').value.trim(),
                 displayName: query(this, '#display-name').value.trim(),
                 template: query(this, '#template').value,
+                ...(independent ? { pluginPath } : {}),
             });
+        });
+        query(this, '#link-form').addEventListener('submit', (event) => {
+            event.preventDefault();
+            start(this, 'link', { sourcePath: query(this, '#source-path').value.trim() });
         });
         this.$.app.querySelectorAll('[data-action]').forEach((button) => {
             button.addEventListener('click', () => start(this, button.dataset.action));
