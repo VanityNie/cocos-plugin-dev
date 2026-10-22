@@ -32,6 +32,10 @@ node cli.cjs install --project E:/games/MyGame
 5. 点击“构建并运行”；需要断点调试时，打开生成的 VS Code 工作区。
 6. 点击“打包”，导出源码插件目录和 ZIP。
 
+工作台提供“停止游戏”和“重启游戏”。重复运行会复用已有实例；重新构建前会停止本项目由工作台启动的游戏，释放可执行文件。通过 VS Code 或其他方式启动的游戏由对应工具管理。
+
+耗时构建可点击“取消任务”，命令行可按 Ctrl+C。取消原生构建会等待子进程退出；Creator 编辑器中已开始的资源构建会先完成，再停止后续阶段。“构建并运行”进入游戏启动阶段后，使用“停止游戏”管理实例。
+
 运行时 TS 自动同步到 `assets/__plugin_dev/<name>`，该目录由工具管理；已有 `.meta` 和 UUID 会保留，手工修改引起的冲突会阻止覆盖。
 
 插件 TS 和启停变化会自动触发资源更新。修改普通游戏脚本、场景或资源时，保留“同时更新 TS、场景和资源”勾选。原生插件启停在重新构建并重启游戏后生效。
@@ -47,11 +51,15 @@ node cli.cjs doctor --project E:/games/MyGame
 node cli.cjs prepare --project E:/games/MyGame
 node cli.cjs build --project E:/games/MyGame --refresh-assets
 node cli.cjs run --project E:/games/MyGame
+node cli.cjs stop --project E:/games/MyGame
+node cli.cjs restart --project E:/games/MyGame
 node cli.cjs debug --project E:/games/MyGame
 node cli.cjs package --project E:/games/MyGame --name my-plugin --output-dir E:/exports
 ```
 
 CLI 还提供 `list`、`enable`、`disable`、`sync` 和 `configure`。进度写入标准错误，结果以 JSON 写入标准输出。
+
+`restart` 使用现有构建；源码变化后应先执行 `build`。取消完成后，CLI 返回退出码 `130`。
 
 CLI `prepare` 会启动 Creator，使用前先保存并关闭对应项目；项目已打开时，使用编辑器面板准备资源。
 
@@ -67,6 +75,8 @@ node cli.cjs install --project E:/games/PluginSandbox
 ## 调试与构建
 
 原生构建缓存位于 `.plugin-dev/build/windows`。默认使用 MSVC 和 Ninja，可通过 `--compiler clang-cl` 切换编译器。
+
+同一项目的构建与进程操作互斥。若异常退出后报告 `PROJECT_LOCK_RECOVERY_REQUIRED`，确认上次构建进程已停止，再移除报错指出的锁目录并重试。
 
 调试工作区位于 `.plugin-dev/plugin-dev.code-workspace`，包含 C++ 启动和 V8 Inspector 附加配置。clangd 使用 CMake 生成的 `compile_commands.json`。
 

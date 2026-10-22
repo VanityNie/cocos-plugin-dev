@@ -46,13 +46,15 @@
       <button type="button" data-action="build-run" class="primary" data-mutation>构建并运行</button>
       <button type="button" data-action="build" data-mutation>仅构建</button>
       <button type="button" data-action="run" data-mutation>运行现有构建</button>
+      <button type="button" data-action="stop" data-mutation>停止游戏</button>
+      <button type="button" data-action="restart" data-mutation>重启游戏</button>
       <button type="button" data-action="debug" data-mutation>打开调试工作区</button>
     </div>
     <p class="hint">首次准备使用当前编辑器生成 Windows 宿主。Creator 当前使用的 JS 与 C++ 引擎须与环境设置一致。调试工作区提供 C++ 与 TS 调试配置；断点调试从 VS Code 启动。</p>
   </section>
 
   <section class="log-section">
-    <div class="section-header"><h2>操作日志</h2><span id="task-status" class="status">就绪</span></div>
+    <div class="section-header"><h2>操作日志</h2><div class="task-controls"><button id="cancel-task" type="button" hidden>取消任务</button><span id="task-status" class="status">就绪</span></div></div>
     <p id="task-detail" class="hint">构建过程在后台执行，关闭面板后可重新打开查看。</p>
     <pre id="log" tabindex="0" aria-label="插件开发操作日志">等待操作。</pre>
   </section>

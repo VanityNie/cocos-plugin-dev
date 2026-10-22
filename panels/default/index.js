@@ -7,7 +7,10 @@ const labels = {
     create: '创建插件', enable: '更新插件状态', sync: '同步运行时文件', package: '打包插件',
     doctor: '检查环境', prepare: '准备 Windows 宿主', configure: '配置原生构建',
     build: '编译 Windows 宿主', run: '启动游戏', 'build-run': '构建并运行', debug: '生成调试工作区',
+    stop: '停止游戏', restart: '重启游戏',
 };
+
+function isPending(task) { return task.status === 'running' || task.status === 'cancelling'; }
 
 function request(message, ...args) { return Editor.Message.request(PACKAGE_NAME, message, ...args); }
 function query(panel, selector) { return panel.$.app.querySelector(selector); }
@@ -34,35 +37,46 @@ function settings(panel) {
     };
 }
 function showTask(panel, task) {
+    const previousSequence = panel._task === task.id ? panel._sequence : 0;
+    if (task.sequence < previousSequence) return;
     panel._task = task.id;
     panel._sequence = task.sequence;
     const label = query(panel, '#task-status');
     label.className = `status ${task.status}`;
-    const statuses = { running: '进行中', succeeded: '已完成', failed: '失败', attention: '需要处理' };
+    const statuses = { running: '进行中', cancelling: '取消中', cancelled: '已取消', succeeded: '已完成', failed: '失败', attention: '需要处理' };
     label.textContent = `${labels[task.action] || task.action} · ${statuses[task.status] || task.status}`;
-    query(panel, '#task-detail').textContent = task.status === 'running'
+    const cancelButton = query(panel, '#cancel-task');
+    cancelButton.hidden = !task.canCancel && task.status !== 'cancelling';
+    cancelButton.disabled = !task.canCancel || panel._cancelRequested;
+    cancelButton.textContent = task.status === 'cancelling' ? '取消中…' : '取消任务';
+    query(panel, '#task-detail').textContent = task.status === 'cancelling'
+        ? task.waitingForEditorBuild ? '等待 Creator 资源构建结束，随后停止后续操作。' : '正在结束当前操作，请稍候。'
+        : task.status === 'cancelled' ? '操作已取消，可重新执行。'
+        : task.status === 'running'
         ? '正在执行，请稍候。关闭面板不会中断操作；构建期间其他写入操作已暂停。'
         : task.status === 'attention' ? '操作需要后续处理，请查看下方日志中的具体步骤。'
             : task.status === 'failed' ? '操作未完成。修复日志中的错误后重新执行。'
-                : (task.action === 'run' || task.action === 'build-run') ? '游戏进程已启动；请通过游戏画面、运行日志或断点验证插件行为。' : '操作已结束，详细结果见下方日志。';
+                : task.action === 'stop' ? (task.result && task.result.stopped ? '游戏进程已停止。' : '当前没有由工作台管理的运行中游戏。')
+                : ['run', 'restart', 'build-run'].includes(task.action) ? (task.result && task.result.alreadyRunning ? '游戏已在运行，未启动新进程。' : '游戏进程已启动；请通过游戏画面、运行日志或断点验证插件行为。') : '操作已结束，详细结果见下方日志。';
     const log = query(panel, '#log');
     const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
     if (task.logs.length) {
-        log.textContent += task.logs.map((line) => line.text).join('');
+        log.textContent += task.logs.filter((line) => line.seq > previousSequence).map((line) => line.text).join('');
         if (log.textContent.length > 200000) log.textContent = '[较早日志已截断]\n' + log.textContent.slice(-180000);
         if (atBottom) log.scrollTop = log.scrollHeight;
     }
-    busy(panel, task.status === 'running');
+    busy(panel, isPending(task));
 }
 function schedulePoll(panel) {
     clearTimeout(panel._timer);
     panel._timer = setTimeout(async () => {
         if (panel._closed) return;
         try {
-            const task = await request('get-task', panel._task, panel._sequence);
-            if (panel._closed) return;
+            const taskId = panel._task;
+            const task = await request('get-task', taskId, panel._sequence);
+            if (panel._closed || panel._task !== taskId) return;
             showTask(panel, task);
-            if (task.status === 'running') schedulePoll(panel);
+            if (isPending(task)) schedulePoll(panel);
             else {
                 if (task.status === 'failed') notice(panel, task.error ? task.error.split('\n')[0] : '操作失败，请检查日志。');
                 await refresh(panel, false);
@@ -90,6 +104,25 @@ async function start(panel, action, input = {}) {
         if (panel._closed) return;
         busy(panel, false);
         notice(panel, error.message || String(error));
+    }
+}
+
+async function cancel(panel) {
+    if (!panel._task || panel._cancelRequested) return;
+    panel._cancelRequested = true;
+    query(panel, '#cancel-task').disabled = true;
+    try {
+        const task = await request('cancel-task', panel._task);
+        if (panel._closed) return;
+        showTask(panel, task);
+        schedulePoll(panel);
+    } catch (error) {
+        if (!panel._closed) {
+            notice(panel, error.message || String(error));
+            await refresh(panel);
+        }
+    } finally {
+        panel._cancelRequested = false;
     }
 }
 
@@ -144,8 +177,9 @@ async function refresh(panel, restoreTask = true) {
         renderPlugins(panel, context.plugins);
         if (restoreTask && context.task) {
             query(panel, '#log').textContent = '';
+            panel._sequence = 0;
             showTask(panel, context.task);
-            if (context.task.status === 'running') schedulePoll(panel);
+            if (isPending(context.task)) schedulePoll(panel);
         } else if (restoreTask) busy(panel, false);
     } catch (error) {
         if (!panel._closed) notice(panel, error.message || String(error));
@@ -161,7 +195,9 @@ module.exports = Editor.Panel.define({
         this._busy = false;
         this._settingsLoaded = false;
         this._sequence = 0;
+        this._cancelRequested = false;
         query(this, '#refresh').addEventListener('click', () => refresh(this));
+        query(this, '#cancel-task').addEventListener('click', () => cancel(this));
         query(this, '#save-settings').addEventListener('click', async () => {
             try {
                 await request('save-settings', settings(this));

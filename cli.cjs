@@ -21,6 +21,8 @@ node cli.cjs <command> --project <Creator project> [options]
   configure   Configure an independent native development build
   build       Incrementally build; --refresh-assets rebuilds project assets first
   run         Run the built Windows game
+  stop        Stop the game started by this workbench
+  restart     Restart the built game without rebuilding
   debug       Generate a separate VS Code workspace for native/JS debugging
   sandbox     Create an independent project from the installed Creator 3D template
 
@@ -85,14 +87,23 @@ function createSandbox(options) {
     return { projectPath: target, templatePath, message: 'Independent sandbox created. Install the tools, create a plugin, then prepare the Windows host.' };
 }
 
-async function main(argv) {
+function checkCancelled(signal) {
+    if (!signal || !signal.aborted) return;
+    const error = new Error('Operation cancelled.');
+    error.name = 'AbortError';
+    error.code = 'ABORT_ERR';
+    throw error;
+}
+
+async function main(argv, { signal } = {}) {
+    checkCancelled(signal);
     if (!argv.length || ['help', '--help', '-h'].includes(argv[0])) return process.stdout.write(HELP);
     const { command, options } = parseArgs(argv);
     if (!options.projectPath) throw new Error('--project is required');
     const settingsPath = path.join(options.projectPath, '.plugin-dev', 'ui-settings.json');
     let settings = {};
     if (command !== 'sandbox' && fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, ''));
-    const input = { ...settings, ...options, onOutput: (message) => process.stderr.write(String(message)) };
+    const input = { ...settings, ...options, signal, onOutput: (message) => process.stderr.write(String(message)) };
     let result;
     if (command === 'sandbox') result = createSandbox(input);
     else if (['install', 'create', 'list', 'enable', 'disable', 'sync', 'package'].includes(command)) {
@@ -105,16 +116,35 @@ async function main(argv) {
         else result = await core.packagePlugin(input);
     } else {
         const windows = require('./lib/windows.cjs');
-        const method = { doctor: 'doctor', prepare: 'prepareHost', configure: 'configure', build: 'build', run: 'run', debug: 'debugWorkspace' }[command];
+        const method = { doctor: 'doctor', prepare: 'prepareHost', configure: 'configure', build: 'build', run: 'run', stop: 'stop', restart: 'restart', debug: 'debugWorkspace' }[command];
         if (!method) throw new Error(`Unknown command: ${command}`);
         result = await windows[method](input);
     }
+    checkCancelled(signal);
     process.stdout.write(JSON.stringify(result, null, 2) + '\n');
 }
 
-if (require.main === module) main(process.argv.slice(2)).catch((error) => {
-    process.stderr.write(`Plugin development: ${error.message}\n`);
-    process.exitCode = 1;
-});
+async function runCLI(argv) {
+    const controller = new AbortController();
+    const cancel = () => {
+        if (controller.signal.aborted) return;
+        process.stderr.write('Cancelling; waiting for active work to stop...\n');
+        controller.abort();
+    };
+    process.on('SIGINT', cancel);
+    process.on('SIGTERM', cancel);
+    try {
+        await main(argv, { signal: controller.signal });
+    } catch (error) {
+        const cancelled = error.name === 'AbortError' || error.code === 'ABORT_ERR';
+        process.stderr.write(`Plugin development: ${cancelled ? 'Operation cancelled.' : error.message}\n`);
+        process.exitCode = cancelled ? 130 : 1;
+    } finally {
+        process.removeListener('SIGINT', cancel);
+        process.removeListener('SIGTERM', cancel);
+    }
+}
 
-module.exports = { parseArgs, createSandbox, main };
+if (require.main === module) runCLI(process.argv.slice(2));
+
+module.exports = { parseArgs, createSandbox, main, runCLI };

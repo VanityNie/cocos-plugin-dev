@@ -35,6 +35,7 @@
       "save-settings": { "methods": ["saveSettings"] },
       "start-task": { "methods": ["startTask"] },
       "get-task": { "methods": ["getTask"] },
+      "cancel-task": { "methods": ["cancelTask"] },
       "open-source": { "methods": ["openSource"] }
     }
   }

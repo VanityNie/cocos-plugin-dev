@@ -6,6 +6,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const windows = require('../lib/windows.cjs');
+const processes = require('../lib/processes.cjs');
 const { _internal: internal } = windows;
 
 function fixture(t) {
@@ -145,4 +146,74 @@ test('MSVC launcher converts streamed compiler output and preserves compiler sta
     const result = await internal.execute(process.execPath, [launcher, 'gbk', process.execPath, '-e', 'process.stdout.write(Buffer.from([0xd6,0xd0,0xce,0xc4]))']);
     assert.equal(result.output, '中文');
     await assert.rejects(internal.execute(process.execPath, [launcher, 'gbk', process.execPath, '-e', 'process.exit(7)']), /exit 7/);
+});
+
+test('already cancelled subprocess never launches or creates a log', async (t) => {
+    const { root } = fixture(t);
+    const sentinel = path.join(root, 'launched');
+    const logPath = path.join(root, 'log.txt');
+    const controller = new AbortController(); controller.abort();
+    await assert.rejects(internal.execute(process.execPath, ['-e', 'require("fs").writeFileSync(process.argv[1], "spawned")', sentinel], { signal: controller.signal, logPath }), { name: 'AbortError', code: 'ABORT_ERR' });
+    assert.equal(fs.existsSync(sentinel), false);
+    assert.equal(fs.existsSync(logPath), false);
+});
+
+test('Windows operations reject an already cancelled signal before touching project state', async (t) => {
+    const { root } = fixture(t);
+    const controller = new AbortController(); controller.abort();
+    for (const operation of [windows.doctor, windows.prepareHost, windows.configure, windows.build, windows.run, windows.stop, windows.restart, windows.debugWorkspace]) {
+        await assert.rejects(operation({ projectPath: root, signal: controller.signal }), { name: 'AbortError', code: 'ABORT_ERR' });
+    }
+    assert.equal(fs.existsSync(path.join(root, '.plugin-dev')), false);
+});
+
+test('cancelling a native task waits for its real child and grandchild to exit before releasing the project lock', { timeout: 40000 }, async (t) => {
+    const { root } = fixture(t);
+    const pidFile = path.join(root, 'children.json');
+    const controller = new AbortController();
+    let reportedReady = false;
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    t.after(() => clearTimeout(timeout));
+    const script = 'const cp=require("child_process");const fs=require("fs");const c=cp.spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"inherit"});fs.writeFileSync(process.argv[1],JSON.stringify({parent:process.pid,child:c.pid}));console.log("READY");setInterval(()=>{},1000);';
+    const operation = processes.withLock(root, () => internal.execute(process.execPath, ['-e', script, pidFile], {
+        signal: controller.signal,
+        onOutput: (text) => { if (text.includes('READY')) { reportedReady = true; controller.abort(); } },
+    }), { signal: controller.signal });
+    await assert.rejects(operation, { name: 'AbortError', code: 'ABORT_ERR' });
+    assert.equal(reportedReady, true);
+    const children = JSON.parse(fs.readFileSync(pidFile, 'utf8'));
+    assert.equal(await processes.inspect(children.parent), null);
+    assert.equal(await processes.inspect(children.child), null);
+    assert.equal(fs.existsSync(path.join(root, '.plugin-dev/windows-operation.lock')), false);
+});
+
+test('editor asset preparation finishes before cancellation is acknowledged', async () => {
+    const controller = new AbortController();
+    let finish;
+    let settled = false;
+    const result = internal.waitForAssets(({ signal }) => {
+        assert.equal(signal, controller.signal);
+        return new Promise((resolve) => { finish = resolve; });
+    }, { projectPath: 'test' }, controller.signal);
+    result.then(() => { settled = true; }, () => { settled = true; });
+    controller.abort();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(settled, false);
+    finish({ enginePath: 'engine' });
+    await assert.rejects(result, { name: 'AbortError', code: 'ABORT_ERR' });
+});
+
+test('editor asset preparation failures are not hidden by a concurrent cancellation', async () => {
+    const controller = new AbortController();
+    await assert.rejects(internal.waitForAssets(async () => { controller.abort(); throw new Error('Builder worker failed'); }, {}, controller.signal), /Builder worker failed/);
+});
+
+test('restart refuses an unbuilt host before stopping the existing owned game', { timeout: 15000 }, async (t) => {
+    const { root, file } = fixture(t);
+    const started = await processes.withLock(root, () => processes.startUnlocked(root, process.execPath, { args: ['-e', 'setInterval(()=>{},1000)'] }));
+    try {
+        file('.plugin-dev/windows.json', { executable: process.execPath });
+        await assert.rejects(windows.restart({ projectPath: root }), /Build the Windows host/);
+        assert.equal((await processes.inspect(started.pid)).pid, started.pid);
+    } finally { await windows.stop({ projectPath: root }); }
 });

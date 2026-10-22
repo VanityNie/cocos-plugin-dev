@@ -9,6 +9,17 @@ const tasks = new Map();
 let activeTask = null;
 let nextTaskId = 0;
 
+function abortError() {
+    const error = new Error('操作已取消。');
+    error.name = 'AbortError';
+    error.code = 'ABORT_ERR';
+    return error;
+}
+
+function throwIfCancelled(task) {
+    if (task.controller.signal.aborted) throw abortError();
+}
+
 function projectPath() {
     const value = Editor.Project.path;
     if (!value || !fs.existsSync(path.join(value, 'package.json'))) {
@@ -77,27 +88,40 @@ async function prepareInEditor(task, options) {
     const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
     const fallback = `保存并关闭当前项目的 Creator 后，在 PowerShell 执行：\nnode ${quote(path.join(__dirname, 'cli.cjs'))} prepare --project ${quote(options.projectPath)} --engine-path ${quote(options.enginePath)}`;
     try {
+        throwIfCancelled(task);
         const engine = await activeEngine();
+        throwIfCancelled(task);
         const expected = normalizedEngine(options.enginePath);
         if (!expected || normalizedEngine(engine.path) !== expected || normalizedEngine(engine.nativePath) !== expected) {
             throw new Error(`当前编辑器的引擎与工作台设置不一致。\nJS：${engine.path}\nC++：${engine.nativePath}\n目标：${options.enginePath}\n请在 Creator 偏好设置中选择相同的 JS 和原生引擎，并重启项目。`);
         }
         const ready = await Editor.Message.request('builder', 'query-worker-ready');
+        throwIfCancelled(task);
         if (!ready) throw new Error('Creator 构建进程尚未就绪。请等项目加载完成后重试。');
         append(task, '正在通过当前编辑器构建 Windows 资源；不会启动第二个 Creator。\n');
         // add-task is a version-adapted, protected Creator API, not a stable public API.
         // Its declaration is builtin/builder/@types/protected/message.d.ts. shouldWait
         // returns BuildExitCode; 36 is BUILD_SUCCESS. Never equate queueing with success.
-        const result = await Editor.Message.request('builder', 'add-task', {
-            ...options.buildConfig, taskName: 'Plugin Development Windows', nextStages: [],
-        }, true);
+        let result;
+        task.editorBuildPending = true;
+        try {
+            result = await Editor.Message.request('builder', 'add-task', {
+                ...options.buildConfig, taskName: 'Plugin Development Windows', nextStages: [],
+            }, true);
+        } finally {
+            task.editorBuildPending = false;
+        }
+        // Creator's running asset stage has no verified cancellation API. Wait
+        // for it to settle before rejecting; the native stage must not start.
         if (result !== 36) {
             const descriptions = { 32: '构建参数错误', 34: '资源构建失败', 37: '构建器正在处理其他任务', 50: '构建器未知错误' };
             throw new Error(`Creator 构建未完成：${descriptions[result] || `返回值 ${JSON.stringify(result)}，接口可能已变化`}。请检查 Creator 构建日志。`);
         }
+        throwIfCancelled(task);
         append(task, '当前编辑器已完成资源构建（BUILD_SUCCESS=36）。\n');
         return { enginePath: options.enginePath };
     } catch (error) {
+        if (error.name === 'AbortError' || error.code === 'ABORT_ERR') throw error;
         throw new Error(`${error.message}\n\n如果当前 Creator 版本不支持编辑器内构建接口，可使用命令行回退：\n${fallback}`);
     }
 }
@@ -115,6 +139,8 @@ function snapshot(task, after = 0) {
     return {
         id: task.id, action: task.action, projectPath: task.projectPath,
         status: task.status, startedAt: task.startedAt, finishedAt: task.finishedAt,
+        canCancel: CANCELLABLE_ACTIONS.has(task.action) && !task.cancellationClosed && task.status === 'running',
+        waitingForEditorBuild: Boolean(task.editorBuildPending),
         logs: task.logs.filter((line) => line.seq > after), sequence: task.sequence,
         result: task.result, error: task.error,
     };
@@ -154,15 +180,33 @@ async function openPath(file) {
     return resolved;
 }
 
-const ACTIONS = new Set(['create', 'enable', 'sync', 'package', 'doctor', 'prepare', 'configure', 'build', 'run', 'build-run', 'debug']);
+const ACTIONS = new Set(['create', 'enable', 'sync', 'package', 'doctor', 'prepare', 'configure', 'build', 'run', 'stop', 'restart', 'build-run', 'debug']);
+const CANCELLABLE_ACTIONS = new Set(['prepare', 'configure', 'build', 'build-run']);
+
+function requestCancellation(task) {
+    if (task.status === 'cancelling') return;
+    task.status = 'cancelling';
+    append(task, task.editorBuildPending
+        ? '已请求取消。正在等待 Creator 资源构建结束，随后停止后续操作。\n'
+        : '已请求取消，正在等待当前进程结束。\n');
+    task.controller.abort();
+}
+
+function logRunResult(task, result) {
+    append(task, result && result.alreadyRunning
+        ? '游戏已在运行，未启动新进程。\n'
+        : '游戏进程已启动，运行状态请查看游戏画面和日志。\n');
+}
 
 async function execute(task, input, settings) {
+    throwIfCancelled(task);
     const options = {
         projectPath: task.projectPath,
         ...(settings.enginePath ? { enginePath: settings.enginePath } : {}),
         ...(settings.creatorPath ? { creatorPath: settings.creatorPath } : {}),
         onOutput: (value) => append(task, value),
         prepareAssets: (request) => prepareInEditor(task, request),
+        signal: task.controller.signal,
     };
     const pluginOptions = { ...options, name: input.name };
     let result;
@@ -205,12 +249,25 @@ async function execute(task, input, settings) {
     case 'build': result = await windows().build({ ...options, refreshAssets: Boolean(input.refreshAssets) }); break;
     case 'run':
         result = await windows().run(options);
-        append(task, '已启动游戏进程。此状态仅确认启动，运行日志及断点用于检查插件行为。\n');
+        logRunResult(task, result);
+        break;
+    case 'stop':
+        result = await windows().stop(options);
+        append(task, result && result.stopped ? '游戏进程已停止。\n' : '当前没有由工作台管理的运行中游戏。\n');
+        break;
+    case 'restart':
+        result = await windows().restart(options);
+        logRunResult(task, result);
         break;
     case 'build-run':
         await windows().build({ ...options, refreshAssets: Boolean(input.refreshAssets) });
+        throwIfCancelled(task);
+        // Once launch begins, cancellation no longer represents stopping a build.
+        // A running game is managed explicitly by the stop/restart operations.
+        task.cancellationClosed = true;
+        append(task, '构建完成，正在启动游戏。\n');
         result = await windows().run(options);
-        append(task, '构建完成，游戏进程已启动。\n');
+        logRunResult(task, result);
         break;
     case 'debug':
         result = await windows().debugWorkspace(options);
@@ -262,6 +319,7 @@ exports.methods = {
         const task = {
             id: String(++nextTaskId), action, projectPath: project, status: 'running',
             startedAt: new Date().toISOString(), logs: [], sequence: 0,
+            controller: new AbortController(),
         };
         activeTask = task;
         tasks.set(task.id, task);
@@ -269,15 +327,22 @@ exports.methods = {
         append(task, `开始：${action}\n项目：${project}\n`);
         // Return an ID immediately. Long native builds must not depend on the IPC timeout.
         Promise.resolve().then(() => execute(task, input || {}, settings)).then((result) => {
+            throwIfCancelled(task);
             task.result = result;
             task.status = task.outcome || 'succeeded';
+            append(task, task.status === 'attention' ? '操作需要后续处理。\n' : '操作完成。\n');
         }).catch((error) => {
-            task.error = error.stack || error.message || String(error);
-            task.status = 'failed';
-            append(task, `\n操作失败：${task.error}\n`);
+            if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
+                task.status = 'cancelled';
+                append(task, '操作已取消。\n');
+            } else {
+                task.error = error.stack || error.message || String(error);
+                task.status = 'failed';
+                append(task, `\n操作失败：${task.error}\n`);
+            }
         }).finally(() => {
             task.finishedAt = new Date().toISOString();
-            activeTask = null;
+            if (activeTask === task) activeTask = null;
         });
         return snapshot(task);
     },
@@ -286,6 +351,15 @@ exports.methods = {
         const task = tasks.get(String(id));
         if (!task || task.projectPath !== projectPath()) throw new Error('任务已失效，请刷新面板。');
         return snapshot(task, Number(after) || 0);
+    },
+
+    cancelTask(id) {
+        const task = tasks.get(String(id));
+        if (!task || task.projectPath !== projectPath() || task !== activeTask) throw new Error('没有可取消的当前任务。');
+        if (!CANCELLABLE_ACTIONS.has(task.action) || task.cancellationClosed) throw new Error('此阶段不支持取消。游戏启动后可使用“停止游戏”。');
+        if (task.status !== 'running' && task.status !== 'cancelling') throw new Error('任务已结束。');
+        requestCancellation(task);
+        return snapshot(task);
     },
 
     async openSource(name) {
@@ -301,5 +375,8 @@ exports.methods = {
 
 exports.load = function load() {};
 exports.unload = function unload() {
-    if (activeTask) console.warn('[cocos-plugin-dev] 原生构建尚未结束。关闭面板不会取消构建，请等待日志完成后再重载扩展。');
+    if (activeTask && CANCELLABLE_ACTIONS.has(activeTask.action) && !activeTask.cancellationClosed) {
+        requestCancellation(activeTask);
+        console.warn('[cocos-plugin-dev] 扩展已卸载，正在取消当前任务；已启动的 Creator 资源阶段仍需等待结束。');
+    } else if (activeTask) console.warn('[cocos-plugin-dev] 当前操作尚未结束，请等待完成后再重载扩展。');
 };

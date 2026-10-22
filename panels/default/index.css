@@ -48,6 +48,10 @@ summary { cursor: pointer; padding: 12px; color: #c0ccdd; font-size: 12px; }
 #notice.info { background: #283b51; color: #b6d3f4; }
 .status { border-radius: 4px; background: #353d4c; font-size: 11px; padding: 4px 8px; }
 .status.running { background: #304e79; color: #d1e3ff; }
+.status.cancelling { background: #65462b; color: #ffdbb5; }
+.status.cancelled { background: #3c414b; color: #c1c8d3; }
+.task-controls { display: flex; align-items: center; gap: 8px; }
+#cancel-task[hidden] { display: none; }
 .status.failed, .status.attention { background: #65462b; color: #ffdbb5; }
 .status.succeeded { background: #294d3d; color: #b3e4ca; }
 #log { background: #181c22; color: #b9c7db; border: 1px solid #3b4452; border-radius: 6px; min-height: 170px; max-height: 420px; overflow: auto; padding: 13px; font: 11px/1.6 Consolas, "Courier New", monospace; white-space: pre-wrap; word-break: break-word; user-select: text; }
