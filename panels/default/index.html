@@ -1,0 +1,59 @@
+<div id="app">
+  <header>
+    <div><span class="eyebrow">WINDOWS · TS + C++</span><h1>插件开发</h1></div>
+    <button id="refresh" class="quiet" type="button">刷新</button>
+  </header>
+  <p class="intro">在当前游戏中创建插件，复用项目场景、资源和原生宿主进行调试。</p>
+  <div class="project"><span>当前项目</span><code id="project-path">正在连接编辑器…</code></div>
+  <div id="notice" role="status" aria-live="polite"></div>
+
+  <section>
+    <h2><span class="step">1</span> 创建插件</h2>
+    <form id="create-form">
+      <div class="fields">
+        <label>插件标识<input id="plugin-name" placeholder="neural-render" pattern="[a-z][a-z0-9-]*" required maxlength="64" autocomplete="off" /></label>
+        <label>显示名称<input id="display-name" placeholder="神经网络渲染" maxlength="100" autocomplete="off" /></label>
+        <label>模板<select id="template"><option value="native">原生能力 · TS ↔ C++</option><option value="render">渲染扩展 · 自定义 Pass 骨架</option></select></label>
+      </div>
+      <div class="row"><p class="hint">生成源码、CMake、原生清单与 TS 类型。插件标识使用小写字母、数字和连字符。</p><button type="submit" class="primary" data-mutation>创建并启用</button></div>
+    </form>
+  </section>
+
+  <section>
+    <div class="section-header"><h2><span class="step">2</span> 项目插件</h2><span id="plugin-count" class="subtle"></span></div>
+    <div id="plugins"><p class="empty">正在读取插件…</p></div>
+    <p class="hint">插件源码是编辑入口。同步会更新项目中的运行时副本；启用或禁用原生插件，需要重新构建后生效。</p>
+  </section>
+
+  <section>
+    <h2><span class="step">3</span> Windows 联合调试</h2>
+    <details id="settings-details">
+      <summary>环境设置</summary>
+      <div class="settings">
+        <label>引擎源码目录<input id="engine-path" placeholder="引擎根目录，如 E:\engines\cocos-engine" autocomplete="off" /></label>
+        <label>Creator 路径<input id="creator-path" placeholder="留空自动检测；或填 Creator 目录 / CocosCreator.exe" autocomplete="off" /></label>
+        <label>插件导出目录<input id="output-dir" placeholder="默认 .plugin-dev/packages" autocomplete="off" /></label>
+        <div class="row"><p class="hint">配置保存在当前项目 .plugin-dev 中。原生构建缓存与项目已有缓存分开保存。</p><button id="save-settings" type="button" data-mutation>保存设置</button></div>
+      </div>
+    </details>
+    <div class="toolbar">
+      <button type="button" data-action="doctor" data-mutation>检查环境</button>
+      <button type="button" data-action="prepare" data-mutation>首次准备宿主</button>
+      <button type="button" data-action="configure" data-mutation>重新配置</button>
+    </div>
+    <label class="checkbox"><input id="refresh-assets" type="checkbox" checked /> 同时更新 TS、场景和资源（仅改 C++ 时可不选）</label>
+    <div class="toolbar">
+      <button type="button" data-action="build-run" class="primary" data-mutation>构建并运行</button>
+      <button type="button" data-action="build" data-mutation>仅构建</button>
+      <button type="button" data-action="run" data-mutation>运行现有构建</button>
+      <button type="button" data-action="debug" data-mutation>打开调试工作区</button>
+    </div>
+    <p class="hint">首次准备使用当前编辑器生成 Windows 宿主。Creator 当前使用的 JS 与 C++ 引擎须与环境设置一致。调试工作区提供 C++ 与 TS 调试配置；断点调试从 VS Code 启动。</p>
+  </section>
+
+  <section class="log-section">
+    <div class="section-header"><h2>操作日志</h2><span id="task-status" class="status">就绪</span></div>
+    <p id="task-detail" class="hint">构建过程在后台执行，关闭面板后可重新打开查看。</p>
+    <pre id="log" tabindex="0" aria-label="插件开发操作日志">等待操作。</pre>
+  </section>
+</div>

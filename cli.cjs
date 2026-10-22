@@ -1,0 +1,120 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const crypto = require('node:crypto');
+
+const HELP = `Cocos Plugin Development — Windows pilot
+
+node cli.cjs <command> --project <Creator project> [options]
+
+  install     Install this developer extension into the project
+  create      Create and enable a TS + C++ plugin (--name, --template native|render)
+  list        Show project plugins
+  enable      Enable a plugin (--name)
+  disable     Disable a plugin (--name); native changes require rebuilding
+  sync        Synchronize runtime sources (--name)
+  package     Export an installable plugin (--name, --output-dir)
+  doctor      Inspect Windows tools and the native host
+  prepare     Build project assets and generate the official Windows host
+  configure   Configure an independent native development build
+  build       Incrementally build; --refresh-assets rebuilds project assets first
+  run         Run the built Windows game
+  debug       Generate a separate VS Code workspace for native/JS debugging
+  sandbox     Create an independent project from the installed Creator 3D template
+
+Options:
+  --creator-path <CocosCreator.exe>  Select Creator
+  --engine-path <engine root>       Select native engine (must match built JS assets)
+  --compiler msvc|clang-cl          Windows compiler
+  --display-name <label>            Plugin display name
+  --native-source-dir <directory>   Explicit generated Windows CMake source
+  --resource-dir <directory>        Explicit Creator Windows build resources
+
+JSON results go to stdout; progress goes to stderr. Existing project content is
+never replaced by sandbox creation. Use Creator's plugin panel for the GUI flow.
+`;
+
+function parseArgs(argv) {
+    const [command, ...rest] = argv;
+    const options = {};
+    const keys = {
+        project: 'projectPath', name: 'name', template: 'template',
+        'display-name': 'displayName', 'output-dir': 'outputDir',
+        'creator-path': 'creatorPath', 'engine-path': 'enginePath',
+        compiler: 'compiler', 'native-source-dir': 'nativeSourceDir',
+        'resource-dir': 'resourceDir',
+    };
+    for (let i = 0; i < rest.length; ++i) {
+        const flag = rest[i];
+        if (flag === '--refresh-assets') { options.refreshAssets = true; continue; }
+        const key = keys[flag.replace(/^--/, '')];
+        if (!flag.startsWith('--') || !key) throw new Error(`Unknown argument: ${flag}`);
+        if (!rest[i + 1] || rest[i + 1].startsWith('--')) throw new Error(`Missing value for ${flag}`);
+        if (options[key] !== undefined) throw new Error(`Duplicate argument: ${flag}`);
+        options[key] = rest[++i];
+    }
+    if (options.projectPath) options.projectPath = path.resolve(options.projectPath);
+    return { command, options };
+}
+
+function createSandbox(options) {
+    const target = options.projectPath;
+    if (fs.existsSync(target)) throw new Error(`Sandbox path already exists: ${target}`);
+    const creatorPath = require('./lib/windows.cjs')._internal.discoverCreator(options.creatorPath);
+    if (!creatorPath) throw new Error('Creator not found. Pass --creator-path to its installation directory or CocosCreator.exe.');
+    const creatorDir = path.extname(creatorPath).toLowerCase() === '.exe' ? path.dirname(creatorPath) : creatorPath;
+    const templatePath = path.join(creatorDir, 'resources', 'templates', 'hello-3d-world');
+    if (!fs.existsSync(path.join(templatePath, 'package.json'))) {
+        throw new Error(`Creator 3D template not found: ${templatePath}. Pass --creator-path.`);
+    }
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.cpSync(templatePath, target, { recursive: true, errorOnExist: true, force: false });
+    const packagePath = path.join(target, 'package.json');
+    const manifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    manifest.name = 'plugin-development-sandbox';
+    manifest.uuid = crypto.randomUUID();
+    fs.writeFileSync(packagePath, JSON.stringify(manifest, null, 2) + '\n');
+    const settingsDir = path.join(target, '.plugin-dev');
+    fs.mkdirSync(settingsDir, { recursive: true });
+    fs.writeFileSync(path.join(settingsDir, 'ui-settings.json'), JSON.stringify({
+        creatorPath: path.join(creatorDir, 'CocosCreator.exe'),
+        enginePath: options.enginePath || path.join(creatorDir, 'resources', 'resources', '3d', 'engine'),
+    }, null, 2) + '\n');
+    return { projectPath: target, templatePath, message: 'Independent sandbox created. Install the tools, create a plugin, then prepare the Windows host.' };
+}
+
+async function main(argv) {
+    if (!argv.length || ['help', '--help', '-h'].includes(argv[0])) return process.stdout.write(HELP);
+    const { command, options } = parseArgs(argv);
+    if (!options.projectPath) throw new Error('--project is required');
+    const settingsPath = path.join(options.projectPath, '.plugin-dev', 'ui-settings.json');
+    let settings = {};
+    if (command !== 'sandbox' && fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, ''));
+    const input = { ...settings, ...options, onOutput: (message) => process.stderr.write(String(message)) };
+    let result;
+    if (command === 'sandbox') result = createSandbox(input);
+    else if (['install', 'create', 'list', 'enable', 'disable', 'sync', 'package'].includes(command)) {
+        const core = require('./lib/core.cjs');
+        if (command === 'install') result = await core.installTools({ ...input, sourcePath: __dirname });
+        else if (command === 'create') result = await core.createPlugin({ ...input, template: input.template || 'native' });
+        else if (command === 'list') result = await core.listPlugins(input);
+        else if (command === 'enable' || command === 'disable') result = await core.setEnabled({ ...input, enabled: command === 'enable' });
+        else if (command === 'sync') result = await core.syncPlugin(input);
+        else result = await core.packagePlugin(input);
+    } else {
+        const windows = require('./lib/windows.cjs');
+        const method = { doctor: 'doctor', prepare: 'prepareHost', configure: 'configure', build: 'build', run: 'run', debug: 'debugWorkspace' }[command];
+        if (!method) throw new Error(`Unknown command: ${command}`);
+        result = await windows[method](input);
+    }
+    process.stdout.write(JSON.stringify(result, null, 2) + '\n');
+}
+
+if (require.main === module) main(process.argv.slice(2)).catch((error) => {
+    process.stderr.write(`Plugin development: ${error.message}\n`);
+    process.exitCode = 1;
+});
+
+module.exports = { parseArgs, createSandbox, main };

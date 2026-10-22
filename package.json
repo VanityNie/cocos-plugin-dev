@@ -1,0 +1,35 @@
+{
+  "name": "cocos-plugin-dev",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "package_version": 2,
+  "description": "Windows 原生插件开发工作台：在当前项目中开发和调试 TS + C++ 插件。",
+  "author": "Cocos Plugin Development",
+  "main": "./main.js",
+  "scripts": {
+    "test": "node run-tests.cjs",
+    "plugin": "node cli.cjs"
+  },
+  "engines": { "node": ">=18" },
+  "devDependencies": { "jsdom": "26.1.0" },
+  "panels": {
+    "default": {
+      "title": "插件开发 · Windows",
+      "type": "dockable",
+      "main": "./panels/default",
+      "size": { "min-width": 540, "min-height": 480, "width": 940, "height": 780 }
+    }
+  },
+  "contributions": {
+    "menu": [{ "path": "i18n:menu.develop", "label": "插件开发", "message": "open-panel" }],
+    "messages": {
+      "open-panel": { "methods": ["openPanel"] },
+      "get-context": { "methods": ["getContext"] },
+      "save-settings": { "methods": ["saveSettings"] },
+      "start-task": { "methods": ["startTask"] },
+      "get-task": { "methods": ["getTask"] },
+      "open-source": { "methods": ["openSource"] }
+    }
+  }
+}

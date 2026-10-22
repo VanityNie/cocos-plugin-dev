@@ -1,0 +1,148 @@
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const windows = require('../lib/windows.cjs');
+const { _internal: internal } = windows;
+
+function fixture(t) {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-plugin-windows-'));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    const file = (name, value = '') => { const p = path.join(root, name); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value)); return p; };
+    file('package.json', { name: 'game' }); fs.mkdirSync(path.join(root, 'assets'));
+    return { root, file };
+}
+
+test('discovers both official Windows source names without touching an Android cache', (t) => {
+    const { root, file } = fixture(t);
+    file('native/engine/win64/CMakeLists.txt');
+    file('native/engine/android/CMakeLists.txt');
+    file('native/compile_commands.json', 'android');
+    file('build/windows/proj/cfg.cmake');
+    const host = internal.discoverHost(root);
+    assert.equal(host.nativeSourceDir, path.join(root, 'native/engine/win64'));
+    assert.equal(host.resourceDir, path.join(root, 'build/windows'));
+    assert.equal(fs.readFileSync(path.join(root, 'native/compile_commands.json'), 'utf8'), 'android');
+});
+
+test('literal CMake engine path reader handles spaces and rejects unresolved variables', () => {
+    assert.equal(internal.cmakeSet('set(COCOS_X_PATH "C:/My Engine/native" CACHE PATH "")', 'COCOS_X_PATH'), 'C:/My Engine/native');
+    assert.equal(internal.cmakeSet('set(COCOS_X_PATH "${ROOT}/native")', 'COCOS_X_PATH'), null);
+    assert.equal(internal.cmakeSet('set(OTHER x)', 'COCOS_X_PATH'), null);
+});
+
+test('normalizes engine root and native directory to the same root', (t) => {
+    const { root, file } = fixture(t);
+    file('engine/native/CMakeLists.txt');
+    assert.equal(internal.normalizeEngine(path.join(root, 'engine')), path.join(root, 'engine'));
+    assert.equal(internal.normalizeEngine(path.join(root, 'engine/native')), path.join(root, 'engine'));
+    assert.throws(() => internal.normalizeEngine(path.join(root, 'assets')), /native\/CMakeLists/);
+});
+
+test('CMake invocation preserves paths as arguments instead of shell-quoting them', (t) => {
+    const { root } = fixture(t);
+    const state = { nativeSourceDir: path.join(root, 'game with spaces/native/engine/win64'), buildDir: path.join(root, '.plugin-dev/build/windows'), resourceDir: path.join(root, 'resource path'), enginePath: path.join(root, 'engine path'), tools: { ninja: path.join(root, 'ninja.exe'), node: process.execPath } };
+    const args = internal.cmakeArguments(state, path.join(root, 'VC Tools/cl.exe'));
+    assert.equal(args[1], state.nativeSourceDir);
+    assert.ok(args.includes('-DCMAKE_EXPORT_COMPILE_COMMANDS:BOOL=ON'));
+    assert.ok(args.includes('-DUSE_PLUGINS:BOOL=ON'));
+    assert.ok(args.includes(`-DRES_DIR:PATH=${state.resourceDir.replace(/\\/g, '/')}`));
+    assert.ok(args.every((arg) => !arg.startsWith('"')));
+});
+
+test('VsDevCmd bootstrap accepts spaces but rejects shell expansion and metacharacters', () => {
+    const clean = path.resolve('Visual Studio (x86)', 'VsDevCmd.bat');
+    assert.match(internal.vsBootstrapCommand(clean), /-arch=x64 -host_arch=x64/);
+    for (const bad of ['bad&name', '%TEMP%', 'bad!name', 'bad|name', 'bad\nname', 'bad^name', 'bad"name']) {
+        assert.throws(() => internal.vsBootstrapCommand(path.join(bad, 'VsDevCmd.bat')), /Unsafe/);
+    }
+    assert.throws(() => internal.vsBootstrapCommand('other.bat'), /Unsafe/);
+});
+
+test('environment capture handles equals signs and ignores drive pseudo-variables', () => {
+    assert.deepEqual(internal.parseEnvironment('banner\r\n=C:=C:\\a\r\nPath=C:\\VS;C:\\SDK\r\nCUSTOM=a=b\r\n'), { Path: 'C:\\VS;C:\\SDK', CUSTOM: 'a=b' });
+});
+
+test('Creator only treats documented build exit 36 as success', async () => {
+    assert.equal(internal.CREATOR_BUILD_SUCCESS, 36);
+    const result = await internal.execute(process.execPath, ['-e', 'process.exit(36)'], { successCodes: [36] });
+    assert.equal(result.code, 36);
+    await assert.rejects(internal.execute(process.execPath, ['-e', 'process.exit(32)'], { successCodes: [36] }), /exit 32/);
+    await assert.rejects(internal.execute(process.execPath, ['-e', 'process.exit(0)'], { successCodes: [36] }), /exit 0/);
+});
+
+test('native subprocess preserves special characters in arguments and reports errors', async () => {
+    const value = 'a space & %test% ; $(echo nope)';
+    const result = await internal.execute(process.execPath, ['-e', 'process.stdout.write(process.argv[1])', value]);
+    assert.equal(result.output, value);
+    await assert.rejects(internal.execute(process.execPath, ['-e', 'console.error("useful reason");process.exit(2)']), /useful reason/);
+});
+
+test('CMake File API discovers the game target rather than unrelated nested test tools', (t) => {
+    const { root, file } = fixture(t);
+    const prefix = 'build/.cmake/api/v1/reply/';
+    file(`${prefix}index-01.json`, { reply: { 'codemodel-v2': { jsonFile: 'model.json' } } });
+    file(`${prefix}model.json`, { configurations: [{ targets: [{ jsonFile: 'game.json' }, { jsonFile: 'tool.json' }] }] });
+    file(`${prefix}game.json`, { type: 'EXECUTABLE', paths: { source: '.' }, artifacts: [{ path: 'Game.exe' }] });
+    file(`${prefix}tool.json`, { type: 'EXECUTABLE', paths: { source: 'engine/tests' }, artifacts: [{ path: 'test.exe' }] });
+    assert.equal(internal.fileApiExecutable(path.join(root, 'build')), path.join(root, 'build/Game.exe'));
+});
+
+test('workspace uses actual executable, a process task, native debugger and separate inspector', (t) => {
+    const { root } = fixture(t);
+    const state = { enginePath: path.join(root, 'engine'), executable: path.join(root, 'build/MyGame.exe'), buildDir: path.join(root, 'build'), creatorPath: path.join(root, 'Creator.exe'), tools: { clangd: path.join(root, 'clangd.exe') } };
+    const ws = internal.workspaceData(state, root, 'cli.cjs', process.execPath, 6086);
+    assert.equal(ws.launch.configurations[0].program, state.executable);
+    assert.equal(ws.launch.configurations[0].type, 'cppvsdbg');
+    assert.equal(ws.launch.configurations[1].port, 6086);
+    assert.equal(ws.tasks.tasks[0].type, 'process');
+    assert.ok(ws.tasks.tasks[0].args.includes('--project'));
+    assert.ok(ws.settings['clangd.arguments'][0].includes('build'));
+});
+
+test('debug workspace never changes the project .vscode or native compile database', async (t) => {
+    const { root, file } = fixture(t);
+    file('.vscode/launch.json', 'user debugging');
+    file('native/compile_commands.json', 'android database');
+    file('.plugin-dev/windows.json', { configuredAt: 'now', executable: path.join(root, 'build/MyGame.exe'), buildDir: path.join(root, 'build'), tools: { node: process.execPath } });
+    const result = await windows.debugWorkspace({ projectPath: root });
+    assert.equal(result.workspacePath, path.join(root, '.plugin-dev/plugin-dev.code-workspace'));
+    assert.equal(fs.readFileSync(path.join(root, '.vscode/launch.json'), 'utf8'), 'user debugging');
+    assert.equal(fs.readFileSync(path.join(root, 'native/compile_commands.json'), 'utf8'), 'android database');
+    assert.ok(result.warnings.some((warning) => warning.includes('source maps')));
+});
+
+test('run and debugger do not guess an executable before a successful build/configure', async (t) => {
+    const { root } = fixture(t);
+    await assert.rejects(windows.run({ projectPath: root }), /Build the Windows host/);
+    await assert.rejects(windows.debugWorkspace({ projectPath: root }), /Configure the Windows host/);
+});
+
+test('build acknowledgements preserve edits made while the compiler was running', (t) => {
+    const { root, file } = fixture(t);
+    const snapshot = { stable: { enabled: true, tracked: { 'a.ts': 'abc' }, nativeFingerprint: 'native1', needsRebuild: true }, edited: { enabled: true, tracked: { 'a.ts': 'abc' }, nativeFingerprint: 'native1', needsRebuild: true } };
+    const current = JSON.parse(JSON.stringify(snapshot));
+    current.edited.nativeFingerprint = 'native2';
+    file('.plugin-dev/state.json', { schemaVersion: 1, plugins: current });
+    internal.acknowledgePlugins(root, snapshot, 'needsRebuild', true);
+    const result = JSON.parse(fs.readFileSync(path.join(root, '.plugin-dev/state.json'), 'utf8'));
+    assert.equal(result.plugins.stable.needsRebuild, false);
+    assert.equal(result.plugins.edited.needsRebuild, true);
+});
+
+test('MSVC encoding probe distinguishes UTF-8 and GBK localized include prefixes', () => {
+    assert.equal(internal.detectOutputEncoding(Buffer.from('Note: including file: a.h'), 'Note: including file:'), 'utf-8');
+    assert.equal(internal.detectOutputEncoding(Buffer.from([0xd6, 0xd0, 0xce, 0xc4]), '中文'), 'gbk');
+    assert.throws(() => internal.detectOutputEncoding(Buffer.from('unrelated'), 'a required prefix'), /Cannot match MSVC/);
+});
+
+test('MSVC launcher converts streamed compiler output and preserves compiler status', async (t) => {
+    const { file } = fixture(t);
+    const launcher = file('launcher.cjs', internal.compilerLauncherSource());
+    const result = await internal.execute(process.execPath, [launcher, 'gbk', process.execPath, '-e', 'process.stdout.write(Buffer.from([0xd6,0xd0,0xce,0xc4]))']);
+    assert.equal(result.output, '中文');
+    await assert.rejects(internal.execute(process.execPath, [launcher, 'gbk', process.execPath, '-e', 'process.exit(7)']), /exit 7/);
+});
