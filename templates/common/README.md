@@ -1,42 +1,26 @@
 # {{DISPLAY_NAME}}
 
-Created with Cocos Plugin Development, Windows pilot. Template: **{{TEMPLATE}}**.
+TS + C++ 插件，模板：`{{TEMPLATE}}`，目标平台：Windows。
 
-## Develop in the current project
+## 开发
 
-1. Open the generated `runtime/` TS and `native/src/` C++ directly. The editor
-   extension mirrors runtime sources into `assets/__plugin_dev/{{NAME}}/`.
-   Edit the source, not the mirrored copy. Existing `.meta` UUIDs are preserved.
-2. Attach the generated `{{CLASS}}Probe` component to a node in your existing scene.
-3. Use the development panel to build the current project for Windows (debug).
-   Put a TS breakpoint in `PluginProbe.start` and a C++ breakpoint in
-   `{{CLASS}}Bridge::add`. The expected value is 42.
-4. Browser preview uses an explicit JS fallback (`available === false`). A
-   successful fallback does not prove the native plugin has loaded. Windows
-   native logs must say `native=true` and `C++ bridge ready`.
+1. 编辑 `runtime/` 中的 TS 和 `native/src/` 中的 C++。编辑器入口会将运行时源码同步到 `assets/__plugin_dev/{{NAME}}/`，并保留已有 `.meta` UUID；请勿直接编辑该副本。
+2. 将 `{{CLASS}}Probe` 组件挂到场景节点。
+3. 在插件开发面板准备 Windows 宿主，构建并运行当前项目。示例数值接口应返回 `42`。
+4. 使用生成的调试工作区，可在 `{{CLASS}}Probe.start` 和 `{{CLASS}}Bridge::add` 设置断点。TS 源码断点需要正确的 source map。
 
-The native manifest, CMake target and `CC_PLUGIN_ENTRY` all use `{{TARGET}}`.
-The official Creator build scans `extensions/` and links this static library.
-C++ changes need incremental compile, relink and process restart. New source
-files must also be added to `native/src/CMakeLists.txt`.
+浏览器预览使用 JavaScript 回退，此时 `available === false`。Windows 日志中的 `native=true` 和 `C++ bridge ready` 表示实际进入了原生插件。
 
-Use the development panel's enable/disable action; disabling keeps TS APIs and
-component identities available, changes `cc_plugin.json.disabled`, and requires
-a fresh native configure/build. The Creator extension manager's unload action
-alone does not change a statically linked native executable.
+原生清单、CMake target 和 `CC_PLUGIN_ENTRY` 统一使用 `{{TARGET}}`。Creator 构建会扫描项目的 `extensions` 并将静态库链接到游戏。修改 C++ 后需要增量编译、重新链接和重启；新增源文件需加入 `native/src/CMakeLists.txt`。
 
-## Standalone installation
+## 启用与禁用
 
-Copy this package directory under another Creator project's `extensions/` and
-enable the extension. No development tool is required for runtime sync. Build a
-Windows native project using a compatible engine and attach the sample component.
-No project path, build cache, native binary or editor dependency is shipped.
+使用插件开发面板的启停操作，使 TS 开关与 `cc_plugin.json.disabled` 保持一致。禁用后保留 TS 接口和组件标识，原生变更需要重新构建游戏后生效。仅在扩展管理器卸载编辑器入口，不会改变已构建的原生程序。
 
-## Toolchain and compatibility
+## 安装到其他项目
 
-The baseline JSB template was run with Creator 3.8.8 and compiled against
-Cocos engine 4.0.0-beta.0. Selecting a different engine must be done through the
-project's engine configuration; this package never silently rewrites it. Render
-internals are version-sensitive and must be compiled against the selected engine.
+将此插件目录放入另一 Creator 项目的 `extensions/` 并启用扩展。插件自带运行时源码同步功能，无需安装开发工作台。使用兼容引擎构建 Windows 游戏，并按需挂载示例组件。
+
+JS 资源与原生 C++ 必须使用同一套引擎。通过项目的引擎配置选择版本；渲染内部接口和第三方库还需确认版本及 ABI 兼容性。
 
 {{RENDER_README}}

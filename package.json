@@ -3,6 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/VanityNie/cocos-plugin-dev.git"
+  },
+  "homepage": "https://github.com/VanityNie/cocos-plugin-dev#readme",
+  "bugs": "https://github.com/VanityNie/cocos-plugin-dev/issues",
   "package_version": 2,
   "description": "Windows 原生插件开发工作台：在当前项目中开发和调试 TS + C++ 插件。",
   "author": "Cocos Plugin Development",

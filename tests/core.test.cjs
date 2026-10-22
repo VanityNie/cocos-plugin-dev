@@ -136,7 +136,7 @@ test('render template registers a probe without claiming image production', t =>
     assert.match(cpp, /addCustomComputePass/);
     assert.doesNotMatch(cpp, /dispatch\(/);
     assert.match(fs.readFileSync(path.join(plugin.runtimePath, 'index.ts'), 'utf8'), /installRenderProbe/);
-    assert.match(fs.readFileSync(path.join(plugin.pluginPath, 'README.md'), 'utf8'), /does not alter/);
+    assert.match(fs.readFileSync(path.join(plugin.pluginPath, 'README.md'), 'utf8'), /未添加渲染图节点或执行推理/);
 });
 
 test('native changes mark rebuild but not asset refresh, TS and enable changes mark both', t => {

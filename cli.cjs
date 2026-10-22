@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const HELP = `Cocos Plugin Development — Windows pilot
+const HELP = `Cocos Plugin Dev — Windows
 
 node cli.cjs <command> --project <Creator project> [options]
 
