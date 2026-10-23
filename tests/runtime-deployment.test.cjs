@@ -4,6 +4,8 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const core = require('../lib/core.cjs');
 const support = require('../templates/common/editor/plugin-support.cjs');
 const { deployRuntimeFiles } = require('../templates/common/editor/runtime-deployment.cjs');
@@ -240,4 +242,33 @@ test('真实 DLL 的宿主原文件在插件禁用后保持完整', { skip: !pro
     f.enabled('native-dll', false);
     assert.equal(deployRuntimeFiles(f.project, exe).removed, 0);
     assert.equal(support.hash(fs.readFileSync(hostDll)), support.hash(bytes));
+});
+
+test('大型运行时文件分块计算指纹和部署，内存不随文件大小增长', t => {
+    const f = fixture(t);
+    const plugin = f.plugin('large-resource');
+    const source = path.join(plugin.pluginPath, 'native/third_party/bin/weights.bin');
+    fs.mkdirSync(path.dirname(source), { recursive: true });
+    const block = Buffer.alloc(1024 * 1024, 0x5a);
+    const expected = crypto.createHash('sha256');
+    const descriptor = fs.openSync(source, 'wx');
+    try {
+        for (let index = 0; index < 64; index++) {
+            fs.writeSync(descriptor, block);
+            expected.update(block);
+        }
+        fs.writeSync(descriptor, block.subarray(0, 17));
+        expected.update(block.subarray(0, 17));
+    } finally { fs.closeSync(descriptor); }
+    const sha256 = expected.digest('hex');
+    assert.equal(support.hashFile(source), sha256);
+    const exe = f.executable();
+    const result = spawnSync(process.execPath, [path.join(__dirname, 'fixtures/runtime-memory/check.cjs'),
+        f.project, plugin.pluginPath, exe, sha256], { encoding: 'utf8' });
+    assert.equal(result.status, 0, result.stderr);
+    const verification = JSON.parse(result.stdout);
+    assert.equal(verification.deployed, 1);
+    assert.equal(verification.sha256, sha256);
+    assert.ok(verification.bufferGrowth < 8 * 1024 * 1024, JSON.stringify(verification));
+    assert.equal(fs.readdirSync(path.dirname(exe)).some(name => name.endsWith('.tmp')), false);
 });

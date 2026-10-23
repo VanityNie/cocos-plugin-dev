@@ -17,7 +17,7 @@ node cli.cjs <command> --project <Creator project> [options]
   enable      Enable a plugin (--name)
   disable     Disable a plugin (--name); native changes require rebuilding
   sync        Synchronize runtime sources (--name)
-  package     Export an installable plugin (--name, --output-dir)
+  package     Export an installable plugin (--name, --output-dir, --binary)
   doctor      Inspect Windows tools and the native host
   prepare     Build project assets and generate the official Windows host
   configure   Configure an independent native development build
@@ -34,7 +34,8 @@ Options:
   --creator-path <CocosCreator.exe>  Select Creator
   --engine-path <engine root>       Select native engine (must match built JS assets)
   --compiler msvc|clang-cl          Windows compiler
-  --build-type Debug|RelWithDebInfo|Release  CMake build configuration (default: Debug)
+  --build-type Debug|RelWithDebInfo|Release  构建配置；package --binary 缺省使用最近成功构建的配置
+  --binary                         导出已构建的 Windows 原生静态库，仅用于 package
   --display-name <label>            Plugin display name
   --native-source-dir <directory>   Explicit generated Windows CMake source
   --resource-dir <directory>        Explicit Creator Windows build resources
@@ -57,6 +58,12 @@ function parseArgs(argv) {
     for (let i = 0; i < rest.length; ++i) {
         const flag = rest[i];
         if (flag === '--refresh-assets') { options.refreshAssets = true; continue; }
+        if (flag === '--binary') {
+            if (command !== 'package') throw new Error('--binary 仅用于 package。');
+            if (options.binary !== undefined) throw new Error('参数重复: --binary');
+            options.binary = true;
+            continue;
+        }
         const key = keys[flag.replace(/^--/, '')];
         if (!flag.startsWith('--') || !key) throw new Error(`Unknown argument: ${flag}`);
         if (!rest[i + 1] || rest[i + 1].startsWith('--')) throw new Error(`Missing value for ${flag}`);
@@ -65,6 +72,9 @@ function parseArgs(argv) {
     }
     for (const key of ['projectPath', 'pluginPath', 'sourcePath']) {
         if (options[key]) options[key] = path.resolve(options[key]);
+    }
+    if (command === 'package' && options.buildType !== undefined && options.binary !== true) {
+        throw new Error('package 使用 --build-type 时必须同时指定 --binary。');
     }
     return { command, options };
 }
@@ -114,6 +124,11 @@ async function main(argv, { signal } = {}) {
     let settings = {};
     if (command !== 'sandbox' && settingsPath && fs.existsSync(settingsPath)) settings = JSON.parse(fs.readFileSync(settingsPath, 'utf8').replace(/^\uFEFF/, ''));
     const input = { ...settings, ...options, signal, onOutput: (message) => process.stderr.write(String(message)) };
+    if (command === 'package') {
+        input.binary = options.binary === true;
+        delete input.buildType;
+        if (options.buildType !== undefined) input.buildType = options.buildType;
+    }
     let result;
     if (command === 'sandbox') result = createSandbox(input);
     else if (['install', 'create', 'link', 'unlink', 'list', 'enable', 'disable', 'sync', 'package'].includes(command)) {

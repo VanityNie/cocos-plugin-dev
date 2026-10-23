@@ -1,0 +1,8 @@
+{
+  "name": "binary-symbols",
+  "version": "1.0.0",
+  "engine-version": ">=3.8.0 <5.0.0",
+  "disabled": false,
+  "modules": [{ "target": "binary_symbols" }],
+  "platforms": ["windows"]
+}

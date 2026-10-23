@@ -273,7 +273,12 @@ async function execute(task, input, settings) {
         await refreshAssets(task);
         break;
     case 'package':
-        result = await core().packagePlugin({ ...pluginOptions, outputDir: settings.outputDir || path.join(task.projectPath, '.plugin-dev', 'packages') });
+        result = await core().packagePlugin({
+            ...pluginOptions,
+            binary: input.binary === true,
+            buildType: input.buildType,
+            outputDir: settings.outputDir || path.join(task.projectPath, '.plugin-dev', 'packages'),
+        });
         break;
     case 'doctor':
         result = await windows().doctor(options);

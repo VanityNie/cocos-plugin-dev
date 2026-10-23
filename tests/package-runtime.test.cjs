@@ -29,7 +29,7 @@ function fixture(t) {
     return { root, put, host };
 }
 
-test('发布包及独立插件适配目录包含完整构建入口，并独立部署资源', t => {
+test('发布包及独立插件适配目录包含完整构建入口，并独立部署资源', async t => {
     const f = fixture(t);
     const project = f.host('development-host');
     const plugin = core.createPlugin({ projectPath: project, pluginPath: path.join(f.root, 'source'), name: 'published-runtime' });
@@ -37,7 +37,7 @@ test('发布包及独立插件适配目录包含完整构建入口，并独立�
     f.put(path.join(plugin.pluginPath, 'resources/settings.json'), settings);
     const descriptorPath = path.join(plugin.pluginPath, 'plugin-dev.json');
     f.put(descriptorPath, { ...support.readJson(descriptorPath), runtimeFiles: [{ source: 'resources/settings.json', target: 'config/settings.json' }] });
-    const packaged = core.packagePlugin({ projectPath: project, name: plugin.name });
+    const packaged = await core.packagePlugin({ projectPath: project, name: plugin.name });
     const helpers = ['plugin-support.cjs', 'builder.js', 'build-hooks.cjs', 'runtime-deployment.cjs', 'runtime-build.cmake', 'deploy-runtime.cjs', 'windows-build.cjs', 'windows-build.cmake', 'typescript-plugin.cjs'];
     for (const directory of [plugin.extensionPath, packaged.packagePath]) {
         const pkg = support.readJson(path.join(directory, 'package.json'));
@@ -66,7 +66,7 @@ test('发布包及独立插件适配目录包含完整构建入口，并独立�
     assert.equal(fs.existsSync(path.join(packaged.packagePath, '.local')), false);
 });
 
-test('声明的运行时资源被发布过滤规则排除时拒绝生成包', t => {
+test('声明的运行时资源被发布过滤规则排除时拒绝生成包', async t => {
     const f = fixture(t);
     const project = f.host('filtered-host');
     const plugin = core.createPlugin({ projectPath: project, pluginPath: path.join(f.root, 'source'), name: 'filtered-runtime' });
@@ -75,12 +75,12 @@ test('声明的运行时资源被发布过滤规则排除时拒绝生成包', t 
     for (const source of ['.local/settings.json', 'build/settings.json', 'node_modules/settings.json', 'resources/settings.log']) {
         f.put(path.join(plugin.pluginPath, source), { quality: 'high' });
         f.put(descriptorPath, { ...descriptor, runtimeFiles: [{ source, target: 'config/settings.json' }] });
-        assert.throws(() => core.packagePlugin({ projectPath: project, name: plugin.name }), /运行时文件未包含在发布包中/);
+        await assert.rejects(() => core.packagePlugin({ projectPath: project, name: plugin.name }), /运行时文件未包含在发布包中/);
         assert.equal(fs.existsSync(path.join(project, '.plugin-dev/packages')), false);
     }
 });
 
-test('旧插件的发布副本获得完整构建支持，并保留源码和自定义编辑器入口', t => {
+test('旧插件的发布副本获得完整构建支持，并保留源码和自定义编辑器入口', async t => {
     const f = fixture(t);
     const project = f.host('upgraded-package-host');
     const plugin = core.createPlugin({ projectPath: project, pluginPath: path.join(f.root, 'source'), name: 'upgraded-runtime' });
@@ -96,7 +96,7 @@ test('旧插件的发布副本获得完整构建支持，并保留源码和自�
     const sourcePackage = fs.readFileSync(packagePath);
     fs.unlinkSync(path.join(plugin.pluginPath, 'editor/builder.js'));
     fs.unlinkSync(path.join(plugin.pluginPath, 'editor/build-hooks.cjs'));
-    const packaged = core.packagePlugin({ projectPath: project, name: plugin.name });
+    const packaged = await core.packagePlugin({ projectPath: project, name: plugin.name });
     const publishedPackage = support.readJson(path.join(packaged.packagePath, 'package.json'));
     assert.equal(publishedPackage.contributions.builder, './editor/builder.js');
     assert.deepEqual(publishedPackage.contributions.menu, pkg.contributions.menu);
@@ -111,17 +111,17 @@ test('旧插件的发布副本获得完整构建支持，并保留源码和自�
     assert.equal(fs.existsSync(path.join(plugin.pluginPath, 'editor/build-hooks.cjs')), false);
 });
 
-test('发布包缺少已声明的编辑器入口时立即报错', t => {
+test('发布包缺少已声明的编辑器入口时立即报错', async t => {
     const f = fixture(t);
     const project = f.host('missing-entry-host');
     const plugin = core.createPlugin({ projectPath: project, pluginPath: path.join(f.root, 'source'), name: 'missing-entry' });
     const packagePath = path.join(plugin.pluginPath, 'package.json');
     f.put(packagePath, { ...support.readJson(packagePath), main: './editor/missing-main.js' });
-    assert.throws(() => core.packagePlugin({ projectPath: project, name: plugin.name }), /编辑器入口未包含在发布包中/);
+    await assert.rejects(() => core.packagePlugin({ projectPath: project, name: plugin.name }), /编辑器入口未包含在发布包中/);
     assert.equal(fs.existsSync(path.join(project, '.plugin-dev/packages')), false);
 });
 
-test('无效的目录链接不能作为运行时来源或 CMake hook 输出目录', t => {
+test('无效的目录链接不能作为运行时来源或 CMake hook 输出目录', async t => {
     const f = fixture(t);
     const project = f.host('broken-link-host');
     const plugin = core.createPlugin({ projectPath: project, pluginPath: path.join(f.root, 'source'), name: 'linked-runtime' });
@@ -131,7 +131,7 @@ test('无效的目录链接不能作为运行时来源或 CMake hook 输出目�
     fs.symlinkSync(missing, link, process.platform === 'win32' ? 'junction' : 'dir');
     assert.equal(fs.existsSync(link), false);
     assert.throws(() => support.collectRuntimeFiles(plugin.pluginPath), /符号链接|目录联接/);
-    assert.throws(() => core.packagePlugin({ projectPath: project, name: plugin.name }), /符号链接|目录联接/);
+    await assert.rejects(() => core.packagePlugin({ projectPath: project, name: plugin.name }), /符号链接|目录联接/);
     const nativeSourceDir = path.join(project, 'native/engine/win64');
     fs.mkdirSync(nativeSourceDir, { recursive: true });
     fs.symlinkSync(missing, path.join(project, '.plugin-dev/native-build'), process.platform === 'win32' ? 'junction' : 'dir');

@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "managedBy": "cocos-plugin-dev",
+  "name": "binary-symbols",
+  "displayName": "二进制符号测试",
+  "template": "native",
+  "enabled": true,
+  "target": "binary_symbols"
+}

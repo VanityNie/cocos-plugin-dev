@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const support = require('./plugin-support.cjs');
 
 function directoryKey(directory) {
@@ -34,7 +35,7 @@ function targetPath(directory, target) {
 function fileHash(file) {
     if (!fs.existsSync(file)) return null;
     if (!fs.statSync(file).isFile()) throw new Error(`运行时目标必须是文件: ${file}`);
-    return support.hash(fs.readFileSync(file));
+    return support.hashFile(file);
 }
 function enabledPlugins(project) {
     const host = support.readHost(project);
@@ -147,7 +148,7 @@ function deployUnlocked(project, executablePath) {
             throw new Error(`受管运行时文件包含手工修改: ${dest}`);
         }
         if (actual !== null && !managed && actual !== item.sha256) throw new Error(`拒绝覆盖宿主已有文件: ${dest}`);
-        if (actual !== item.sha256) writes.push({ dest, data: item.data });
+        if (actual !== item.sha256) writes.push({ dest, source: item.source, sha256: item.sha256, previousHash: actual });
         nextFiles[fileKey] = { target, sha256: item.sha256, owners: [...new Set(item.owners)].sort(), managed };
     }
     for (const [outputKey, output] of Object.entries({ ...manifest.outputs, [key]: current })) {
@@ -161,13 +162,36 @@ function deployUnlocked(project, executablePath) {
             if (previous.managed && actual !== null && actual !== previous.sha256) throw new Error(`受管运行时文件包含手工修改: ${dest}`);
             if (outputKey !== key && owners.length && actual !== null) {
                 retained[fileKey] = { ...previous, owners };
-            } else if (previous.managed && actual !== null) deletes.push(dest);
+            } else if (previous.managed && actual !== null) deletes.push({ dest, sha256: actual });
         }
         manifest.outputs[outputKey] = { ...output, files: retained };
     }
-    for (const operation of writes) support.write(operation.dest, operation.data);
-    for (const file of deletes) fs.unlinkSync(file);
-    support.writeJson(manifestFile, manifest);
+    const staged = [];
+    try {
+        for (const operation of writes) {
+            noLinks(operation.source);
+            noLinks(operation.dest);
+            fs.mkdirSync(path.dirname(operation.dest), { recursive: true });
+            const temporary = path.join(path.dirname(operation.dest), `.cpd-${crypto.randomUUID()}.tmp`);
+            fs.copyFileSync(operation.source, temporary, fs.constants.COPYFILE_EXCL);
+            staged.push({ ...operation, temporary });
+            if (support.hashFile(temporary) !== operation.sha256) throw new Error(`准备部署期间运行时来源文件发生修改: ${operation.source}`);
+        }
+        // 全部复制内容与目标归属验证通过后，才修改受管文件。
+        for (const operation of staged) {
+            noLinks(operation.dest);
+            if (fileHash(operation.dest) !== operation.previousHash) throw new Error(`准备部署期间目标文件发生修改: ${operation.dest}`);
+        }
+        for (const operation of deletes) {
+            noLinks(operation.dest);
+            if (fileHash(operation.dest) !== operation.sha256) throw new Error(`准备部署期间目标文件发生修改: ${operation.dest}`);
+        }
+        for (const operation of staged) fs.renameSync(operation.temporary, operation.dest);
+        for (const operation of deletes) fs.unlinkSync(operation.dest);
+        support.writeJson(manifestFile, manifest);
+    } finally {
+        for (const operation of staged) if (fs.existsSync(operation.temporary)) fs.unlinkSync(operation.temporary);
+    }
     return { deployed: writes.length, removed: deletes.length, files: Object.values(nextFiles).map(item => item.target),
         manifestPath: manifestFile, legacyUnowned: !!manifest.legacyUnowned };
 }

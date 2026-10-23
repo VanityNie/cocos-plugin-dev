@@ -185,7 +185,7 @@ test('local build state is ignored without rewriting user ignore rules', t => {
     assert.equal(fs.existsSync(path.join(projectPath, '.gitignore')), false);
 });
 
-test('packaging filters caches, creates readable ZIP, and installs independently', t => {
+test('packaging filters caches, creates readable ZIP, and installs independently', async t => {
     const { projectPath, project, root } = fixture(t);
     const plugin = core.createPlugin({ projectPath, name: 'portable-plugin' });
     put(path.join(plugin.pluginPath, 'native/build/CMakeCache.txt'), 'C:/private/cache');
@@ -197,7 +197,7 @@ test('packaging filters caches, creates readable ZIP, and installs independently
     put(path.join(plugin.pluginPath, 'runtime/example.prefab'), '{"component":"portable-component-uuid"}');
     put(path.join(plugin.runtimePath, 'example.prefab.meta'), '{"uuid":"portable-prefab-uuid"}');
     core.setEnabled({ projectPath, name: 'portable-plugin', enabled: false });
-    const result = core.packagePlugin({ projectPath, name: 'portable-plugin' });
+    const result = await core.packagePlugin({ projectPath, name: 'portable-plugin' });
     assert.equal(result.metadataSeeds, 2);
     assert.equal(result.warnings.length, 1);
     assert.equal(readJson(path.join(plugin.pluginPath, 'runtime/PluginProbe.ts.meta')).uuid, 'outdated-source-uuid');
@@ -218,8 +218,8 @@ test('packaging filters caches, creates readable ZIP, and installs independently
     assert.match(fs.readFileSync(path.join(target, 'assets/__plugin_dev/portable-plugin/plugin-enabled.ts'), 'utf8'), /= true/);
     assert.equal(readJson(path.join(target, 'extensions/portable-plugin/native/cc_plugin.json')).disabled, false);
     assert.equal(readJson(path.join(plugin.pluginPath, 'native/cc_plugin.json')).disabled, true);
-    assert.throws(() => core.packagePlugin({ projectPath, name: 'portable-plugin' }), /已存在/);
-    assert.throws(() => core.packagePlugin({ projectPath, name: 'portable-plugin', outputDir: path.join(plugin.pluginPath, 'dist') }), /不能位于/);
+    await assert.rejects(() => core.packagePlugin({ projectPath, name: 'portable-plugin' }), /已存在/);
+    await assert.rejects(() => core.packagePlugin({ projectPath, name: 'portable-plugin', outputDir: path.join(plugin.pluginPath, 'dist') }), /不能位于/);
     if (process.platform === 'win32') {
         const zipTarget = path.join(root, 'unzip-check');
         const script = "$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1]";
@@ -248,6 +248,7 @@ test('tool install supports owned upgrades and refuses unrelated or edited files
     put(path.join(source, 'package.json'), JSON.stringify({ name: 'cocos-plugin-dev', version: '0.1.0' }));
     put(path.join(source, 'main.js'), 'module.exports = {};');
     put(path.join(source, 'node_modules/typescript/package.json'), JSON.stringify({ name: 'typescript', version: '5.9.3' }));
+    put(path.join(source, 'node_modules/typescript/index.js'), 'module.exports = {};');
     put(path.join(source, '.local/private.txt'), 'do not ship');
     const installed = core.installTools({ projectPath, sourcePath: source });
     assert.equal(fs.existsSync(path.join(installed.path, '.local')), false);
@@ -393,11 +394,11 @@ test('host manifest edits are reflected as pending build and source enable remai
     assert.equal(Object.hasOwn(readJson(path.join(plugin.pluginPath, 'plugin-dev.json')), 'enabled'), false);
 });
 
-test('packaging an independent plugin produces a portable embedded extension without host paths', t => {
+test('packaging an independent plugin produces a portable embedded extension without host paths', async t => {
     const { root, projectPath, project } = fixture(t);
     const plugin = core.createPlugin({ pluginPath: path.join(root, 'package-source'), projectPath, name: 'package-source' });
     core.setEnabled({ projectPath, name: 'package-source', enabled: false });
-    const packaged = core.packagePlugin({ projectPath, name: 'package-source' });
+    const packaged = await core.packagePlugin({ projectPath, name: 'package-source' });
     const descriptor = readJson(path.join(packaged.packagePath, 'plugin-dev.json'));
     assert.equal(descriptor.schemaVersion, 1);
     assert.equal(descriptor.enabled, true);
@@ -537,7 +538,7 @@ test('watcher setup failure closes already opened source watchers and rejects ex
     assert.equal(closed, 1);
 });
 
-test('插件创建生成独立的源码类型环境与宿主类型项目', t => {
+test('插件创建生成独立的源码类型环境与宿主类型项目', async t => {
     const { root, projectPath, project } = fixture(t);
     const pluginPath = path.join(root, 'typed-plugin');
     const created = core.createPlugin({ pluginPath, name: 'typed-plugin' });
@@ -559,7 +560,7 @@ test('插件创建生成独立的源码类型环境与宿主类型项目', t => 
     assert.match(fs.readFileSync(first.targetFile, 'utf8'), /declare module 'cc'/);
     assert.match(fs.readFileSync(second.targetFile, 'utf8'), /declare module 'cc'/);
 
-    const packaged = core.packagePlugin({ projectPath, name: 'typed-plugin' });
+    const packaged = await core.packagePlugin({ projectPath, name: 'typed-plugin' });
     assert.equal(fs.existsSync(path.join(packaged.packagePath, 'tsconfig.json')), true);
     assert.equal(fs.existsSync(path.join(packaged.packagePath, '.local')), false);
     assert.equal(created.pluginPath, pluginPath);

@@ -42,6 +42,10 @@ endif()
 
 include("${CMAKE_CURRENT_LIST_DIR}/runtime-build.cmake")
 
+if(CPD_BINARY_METADATA_MODULE)
+    include("${CPD_BINARY_METADATA_MODULE}")
+endif()
+
 if(CMAKE_BUILD_TYPE STREQUAL "RelWithDebInfo" AND USE_V8_DEBUGGER AND USE_V8_DEBUGGER_FORCE)
     # 官方 Game.cpp 通过 CC_DEBUG 启动 Inspector；引擎继续使用当前构建配置。
     set(plugin_dev_game_source "${CC_PROJECT_DIR}/../common/Classes/Game.cpp")

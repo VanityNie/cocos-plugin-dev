@@ -1,0 +1,6 @@
+{
+  "name": "binary-symbols",
+  "version": "1.0.0",
+  "package_version": 2,
+  "main": "./editor/main.js"
+}

@@ -736,3 +736,18 @@ test('invalid reference rows preserve the diagnostic and offer only unlink', asy
         dom.window.close();
     }
 });
+
+test('panel package task ignores saved buildType and exports source package cleanly', async (t) => {
+    const realCore = require('../lib/core.cjs');
+    const { methods, project } = editorHarness(t, {}, realCore);
+    methods.saveSettings({ buildType: 'RelWithDebInfo' });
+    realCore.createPlugin({ projectPath: project, name: 'panel-pkg' });
+    const started = methods.startTask('package', { name: 'panel-pkg' });
+    for (let i = 0; i < 40 && methods.getTask(started.id).status === 'running'; i++) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const done = methods.getTask(started.id);
+    assert.equal(done.status, 'succeeded', done.error);
+    assert.equal(done.result.binary, false);
+    assert.ok(fs.existsSync(done.result.zipPath));
+});

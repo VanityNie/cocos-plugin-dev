@@ -41,7 +41,7 @@ function compile(configFile) {
     return program;
 }
 
-test('独立源码的默认类型检查与生成目录的 Git 忽略规则有效', t => {
+test('独立源码的默认类型检查与生成目录的 Git 忽略规则有效', async t => {
     const { root, host } = fixture(t);
     execFileSync('git', ['init', '--quiet', root], { windowsHide: true });
     const standalone = core.createPlugin({ pluginPath: path.join(root, 'standalone'), name: 'standalone' });
@@ -56,7 +56,7 @@ test('独立源码的默认类型检查与生成目录的 Git 忽略规则有效
     support.write(ignoreFile, '! *\n!*\n');
     support.syncTypeDeclarations(undefined, embedded.pluginPath);
     execFileSync('git', ['check-ignore', '--quiet', path.join(embedded.pluginPath, '.local/cc-default.d.ts')], { cwd: root, windowsHide: true });
-    const exported = core.packagePlugin({ projectPath: path.dirname(path.dirname(embedded.pluginPath)), name: 'embedded' });
+    const exported = await core.packagePlugin({ projectPath: path.dirname(path.dirname(embedded.pluginPath)), name: 'embedded' });
     assert.equal(fs.existsSync(path.join(exported.packagePath, '.local')), false);
     const installedHost = host('installed-host');
     const installed = path.join(installedHost, 'extensions', 'embedded');

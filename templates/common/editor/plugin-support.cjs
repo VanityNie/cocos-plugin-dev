@@ -6,6 +6,7 @@ const path = require('node:path');
 const crypto = require('node:crypto');
 const OWNER = 'cocos-plugin-dev';
 const heldLocks = new Set();
+const fileHashBuffer = Buffer.allocUnsafe(1024 * 1024);
 
 function fail(message) { throw new Error(message); }
 function validateName(name) {
@@ -41,6 +42,24 @@ function projectRoot(projectPath) {
 }
 function readJson(file) { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
 function hash(data) { return crypto.createHash('sha256').update(data).digest('hex'); }
+function hashFile(file) {
+    const descriptor = fs.openSync(file, 'r');
+    try {
+        const before = fs.fstatSync(descriptor);
+        if (!before.isFile()) fail(`需要普通文件: ${file}`);
+        const digest = crypto.createHash('sha256');
+        for (;;) {
+            const count = fs.readSync(descriptor, fileHashBuffer, 0, fileHashBuffer.length, null);
+            if (!count) break;
+            digest.update(fileHashBuffer.subarray(0, count));
+        }
+        const after = fs.fstatSync(descriptor);
+        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs || before.ctimeMs !== after.ctimeMs) {
+            fail(`计算指纹期间文件发生修改: ${file}`);
+        }
+        return digest.digest('hex');
+    } finally { fs.closeSync(descriptor); }
+}
 function write(file, value) {
     const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value);
     if (fs.existsSync(file) && fs.readFileSync(file).equals(bytes)) return false;
@@ -259,7 +278,7 @@ function runtimeFilter(rel, item) {
     if (item.isDirectory()) return !['build', 'out', 'cache', 'temp', '.vs', 'CMakeFiles'].includes(item.name);
     return !/\.(obj|pdb|ilk|log|tmp|bak)$/.test(item.name) && item.name !== '.DS_Store';
 }
-function collectRuntimeFiles(pluginPath, meta) {
+function collectRuntimeFiles(pluginPath, meta, fileHashes = new Map()) {
     const resolvedRoot = path.resolve(pluginPath);
     noLinks(path.parse(resolvedRoot).root, resolvedRoot);
     const descriptor = meta || (fs.existsSync(path.join(resolvedRoot, 'plugin-dev.json')) ? readJson(path.join(resolvedRoot, 'plugin-dev.json')) : {});
@@ -268,11 +287,12 @@ function collectRuntimeFiles(pluginPath, meta) {
     const recordFile = (targetRel, absSource) => {
         const normalizedTarget = normalizeRelTarget(targetRel);
         const key = normalizedTarget.toLowerCase();
-        const data = fs.readFileSync(absSource);
-        const sha256 = hash(data);
+        const sourceKey = path.resolve(absSource);
+        if (!fileHashes.has(sourceKey)) fileHashes.set(sourceKey, hashFile(absSource));
+        const sha256 = fileHashes.get(sourceKey);
         const existing = entries.get(key);
         if (existing && existing.sha256 !== sha256) fail(`插件内部运行时文件目标冲突: ${normalizedTarget}`);
-        entries.set(key, { target: normalizedTarget, source: absSource, data, sha256 });
+        entries.set(key, { target: normalizedTarget, source: absSource, sha256 });
     };
     for (const binRel of ['native/third_party/bin', 'native/windows/bin']) {
         const binDir = path.join(resolvedRoot, binRel);
@@ -302,8 +322,13 @@ function nativeFingerprint(pluginPath, meta) {
     const excluded = new Set(['build', 'out', 'cache', 'temp', '.vs', 'CMakeFiles']);
     const files = walk(root, (rel, item) => item.isDirectory() ? !excluded.has(item.name)
         : !/\.(obj|pdb|ilk|log|tmp)$/.test(item.name) && item.name !== 'CMakeCache.txt' && item.name !== 'compile_commands.json');
-    const entries = files.map(rel => `${rel}:${hash(fs.readFileSync(path.join(root, rel)))}`);
-    const runtimeItems = collectRuntimeFiles(pluginPath, meta);
+    const fileHashes = new Map();
+    const runtimeItems = collectRuntimeFiles(pluginPath, meta, fileHashes);
+    const entries = files.map(rel => {
+        const source = path.resolve(root, rel);
+        if (!fileHashes.has(source)) fileHashes.set(source, hashFile(source));
+        return `${rel}:${fileHashes.get(source)}`;
+    });
     const descriptor = meta || (fs.existsSync(path.join(pluginPath, 'plugin-dev.json')) ? readJson(path.join(pluginPath, 'plugin-dev.json')) : {});
     if (Array.isArray(descriptor.runtimeFiles) && descriptor.runtimeFiles.length) {
         for (const item of runtimeItems) entries.push(`runtime:${item.target}:${item.sha256}`);
@@ -585,4 +610,4 @@ function setEnabled({ projectPath, name, enabled }) {
     const project = projectRoot(projectPath);
     return withProjectLock(project, () => applySync(prepareSync(project, name, enabled)));
 }
-module.exports = { OWNER, validateName, inside, noLinks, projectRoot, readJson, write, writeJson, hash, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, collectRuntimeFiles, syncTypeDeclarations, prepareTypeScriptSdk, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };
+module.exports = { OWNER, validateName, normalizeRelTarget, inside, noLinks, projectRoot, readJson, write, writeJson, hash, hashFile, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, collectRuntimeFiles, syncTypeDeclarations, prepareTypeScriptSdk, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };
