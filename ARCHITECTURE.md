@@ -63,6 +63,8 @@ flowchart LR
 | `main.js`、`panels/default/` | 编辑器菜单、面板、任务状态与日志。 |
 | `cli.cjs` | 与面板共用核心函数的命令行入口。 |
 | `lib/core.cjs` | 生成插件、安装工作台、管理插件和打包。 |
+| `lib/binary-package.cjs` | 根据成功构建记录与 CMake 元数据收集二进制发布内容，生成配置及 ABI 校验信息。 |
+| `lib/package-archive.cjs` | 通过成熟 ZIP 库流式写入发布归档。 |
 | `lib/windows.cjs` | 探测工具链、准备宿主、配置与构建 C++、生成调试工作区。 |
 | `templates/common/editor/plugin-support.cjs` | 同步运行时文件、检测冲突、记录变更和启停状态；随生成的插件分发。 |
 | `templates/common/editor/typescript-plugin.cjs` | 通过 TypeScript `getExternalFiles` 为原始源码项目加载当前宿主的声明。 |
@@ -102,9 +104,21 @@ VS Code 从源文件所在目录向上查找 tsconfig。工作台的 TypeScript 
 
 旧格式中无法确认归属的记录保存在 `legacyUnowned`，其中的文件按非受管文件处理。内容冲突、手工修改、绝对目标路径、目录越界、符号链接和 Windows 文件名别名均终止部署。
 
-发布包的 `contributions.builder` 指向 `editor/builder.js`，由 Windows hooks 在 `onBeforeBuild` 同步 TS，在资源构建和原生编译前维护宿主 Post hook，并在 `onAfterMake` 核对运行资源。支持文件保存在宿主 `.plugin-dev/native-build`，`native/engine/{win64,windows}/Post-PluginDevWindows.cmake` 通过相对路径加载公共支持，文件归属记录位于 `.plugin-dev/windows-build-hooks.json`。Post hook 加入所在目录的 Git 忽略规则，由构建入口按宿主重新生成。
+发布包的 `contributions.builder` 指向 `editor/builder.js`。Windows hooks 在 `onBeforeBuild` 同步 TS，在 Creator 生成 Windows 原生目录后的 `onAfterCompressSettings` 安装 Post hook，使首次 CMake 配置包含部署入口；`onAfterBuild` 与 `onBeforeMake` 继续核验配置，`onAfterMake` 核对运行资源。支持文件保存在宿主 `.plugin-dev/native-build`，`native/engine/{win64,windows}/Post-PluginDevWindows.cmake` 通过相对路径加载公共支持，文件归属记录位于 `.plugin-dev/windows-build-hooks.json`。Post hook 加入所在目录的 Git 忽略规则，由构建入口按宿主重新生成。
 
 `runtime-build.cmake` 在 Creator 完成依赖复制后，为可执行目标注册 `POST_BUILD`，并建立 `cpd_runtime_deploy` 默认构建目标。CMake 通过 `file(GENERATE)` 写入实际配置和可执行文件路径，供构建 hooks 使用。最后一个插件禁用或解除引用后，宿主公共支持继续执行资源清理。
+
+## 二进制发布
+
+`core.packagePlugin({ binary: true })` 根据宿主最近成功的构建记录选择配置；显式 `buildType` 必须匹配已有构建。检查成功记录、源码指纹和实际产物后，根据 CMake 元数据收集插件静态库及其链接依赖。导出使用单配置 Windows x64 包，输出名称包含平台、架构和配置。
+
+发布配置通过 CMake imported targets 引用 `native/windows/lib` 中的静态库，并验证目标配置、引擎与 C++ ABI。`native/windows/binary-manifest.json` 保存构建版本、ABI 及文件记录。公共头文件分别从 `native/include`、`native/windows/include`、`native/third_party/include` 收集到 `native/windows/lib/include` 的对应目录；`native/src` 保留在开发源码中。
+
+使用 `/Zi` 或 `/ZI` 编译的静态库通过 CMake 编译目标记录取得 compiler PDB。发布时按照原文件名将 PDB 与对应库保存在同一目录，并记录文件指纹，使 `Debug`、`RelWithDebInfo` 的消费项目能够链接完整调试符号。`/Z7` 将调试信息保存在库内。PDB 的源码行号不包含 C++ 实现文件，源码调试仍需另行提供匹配源码。
+
+运行 DLL、模型和显式资源保存到 `native/windows/lib/runtime/<target>`，`runtimeFiles` 改为引用这些包内文件并保留部署目标。TS 运行代码、编辑器入口和构建 hooks 与二进制库一同分发，目标项目完成游戏链接后执行相同的运行资源部署规则。
+
+`packagePlugin` 返回 Promise，ZIP 写入结束后返回结果。归档通过流式 I/O 处理，构建与资源校验失败时终止导出。CLI 将 `--binary` 和显式 `--build-type` 传入打包入口，缺省配置由成功构建记录决定。
 
 ## 引擎与工具链
 
@@ -118,14 +132,4 @@ C++ 和游戏 TS 使用两套调试会话，分别连接原生调试器和 V8 In
 
 ## 渲染扩展
 
-`render` 模板提供 TS → JSB → Custom Pass 注册入口和执行计数。注册只是建立行为名称到原生回调的映射，项目仍需通过 `PipelineBuilder` 添加图节点、声明资源读写并产出有效结果。
-
-渲染插件应在管线创建后获取当前管线，按管线实例管理注册状态。输入输出尺寸或设备状态变化时，需要重建相应资源。空回调不能作为输出纹理的生产者。
-
-接入推理库时，需要明确模型生命周期、张量与纹理格式、设备和队列同步、历史帧资源及错误处理。RenderGraph 的依赖声明需要与外部推理库的同步规则共同满足。
-
-## 发布验收
-
-发布验证使用导出的最终插件包，在全新 Creator 项目中完成安装、资源构建、三种原生构建和真实场景启动，并核对 TS → JSB → C++ 的结果、进程加载的 DLL、PDB 与构建配置。资源部署验证覆盖共享依赖、升级、禁用、解除引用、多输出目录和用户修改保护。
-
-插件 API 应规定对象所有权、线程要求、资源释放和错误行为；渲染与推理插件还应验证图像结果、模型加载、GPU 同步、尺寸变化及资源重建。`engine-version` 范围依据逐版本安装和运行结果设置，CI 保存相应工具链、依赖版本及验收记录。
+`render` 模板提供 TS → JSB → `CustomComputePass` 注册入口和执行计数探针。渲染插件在自定义管线创建后按管线实例注册回调，具体渲染图节点、资源读写声明与同步逻辑由业务插件按需实现。

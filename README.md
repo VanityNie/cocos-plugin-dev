@@ -1,17 +1,19 @@
 # Cocos Plugin Dev
 
-Cocos Creator 的 Windows 插件开发工作台。在独立目录或游戏项目内创建 TS + C++ 插件，选择游戏宿主，完成源码同步、启停、增量构建、运行、调试配置和源码打包。
+[English](README.en.md) | **简体中文**
 
-基于 Cocos 官方原生插件机制。同一份插件源码可以关联多个游戏，各宿主独立保存启用配置、资源副本和构建缓存。实现细节见 [架构说明](ARCHITECTURE.md)。
+Cocos Creator 的 Windows 原生插件开发工作台。支持在独立目录或游戏项目内创建 TS + C++ 插件，关联多个游戏宿主，完成源码同步、启停管理、增量构建、运行调试与打包分发。
+
+基于 Cocos 官方原生插件机制实现。同一份插件源码可关联多个游戏项目，各宿主独立维护启用状态、资源副本、TypeScript 类型环境与构建缓存。架构设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## 环境要求
 
-- Windows x64、Cocos Creator 3.8.8；Cocos 4.0 为实验性支持。
-- Node.js 18 或更新版本。
-- Visual Studio C++ 桌面开发工具集、Windows SDK、CMake、Ninja。
-- 可选：VS Code、C/C++ 调试扩展和 clangd。
+- Windows x64、Cocos Creator 3.8.8（Cocos 4.0 实验性支持）
+- Node.js 18+
+- Visual Studio C++ 桌面开发工具集、Windows SDK、CMake、Ninja
+- 可选：VS Code、C/C++ 调试扩展、clangd
 
-Creator 使用的 JS 引擎与原生构建使用的 C++ 引擎必须匹配。使用自定义引擎时，在 Creator 偏好设置中同时配置两者并重启项目。
+Creator 的 JS 引擎与原生构建的 C++ 引擎版本必须一致。若使用自定义引擎，需在 Creator 偏好设置中同时配置两者并重启编辑器。
 
 ## 安装
 
@@ -22,34 +24,25 @@ npm ci
 node cli.cjs install --project E:/games/MyGame
 ```
 
-将示例路径替换为游戏项目路径。`npm ci` 安装工作台需要的完整 TypeScript SDK，安装命令会将该依赖一并复制到游戏项目。在 Creator 扩展管理器中扫描并启用 `cocos-plugin-dev`，打开 **开发者 → 插件开发**。
+安装后在 Creator **扩展管理器** 中扫描并启用 `cocos-plugin-dev`，通过顶部菜单 **开发者 → 插件开发** 打开工作台面板。
 
-## 使用
+## 使用流程
 
-1. 选择游戏宿主，检查 Creator、引擎和工具链路径。
-2. 输入插件名称，选择原生或渲染模板及源码目录，创建插件；已有源码可直接关联。
-3. 编辑插件源码目录的 `runtime/` 和 `native/src/`。
-4. 点击“首次准备宿主”，生成游戏资源和 Windows 原生工程。
-5. 点击“构建并运行”；需要断点调试时，打开生成的 VS Code 工作区。
-6. 点击“打包”，导出源码插件目录和 ZIP。
+1. 选择游戏宿主，检查 Creator、引擎和编译工具链状态。
+2. 输入插件名称，选择模板（`native` 或 `render`）及源码目录创建插件，或直接关联已有插件源码。
+3. 编辑插件源码目录中的 `runtime/`（TS）和 `native/src/`（C++）。
+4. 点击 **首次准备宿主**，生成游戏资源与 Windows 原生工程。
+5. 点击 **构建并运行** 验证结果；需断点调试时打开生成的 VS Code 工作区。
+6. 点击 **打包**，导出可独立安装的插件目录与 ZIP 压缩包。
 
-宿主默认为当前打开的 Creator 项目，也可以在面板中选择其他项目。当前项目通过编辑器构建资源；其他宿主通过 Creator 命令行构建，准备前应关闭目标项目的 Creator。只有在对应宿主的 Creator 中启用插件扩展，才会启动实时源码监听；命令行构建会先同步最新源码。
+### 宿主与源码管理
 
-独立源码目录与宿主目录应互不包含。项目的 `plugin-dev.host.json` 保存源码引用和启用配置；`extensions/<name>` 是自动生成的接入目录。请编辑独立源码，不要修改接入目录。C++ 直接编译独立目录中的文件，TS 同步到宿主资源目录。
-
-将 `plugin-dev.host.json` 纳入游戏版本管理。源码路径相对游戏根目录解析，跨磁盘时使用绝对路径；其他开发机需将源码放到对应位置，或修改引用后同步。接入目录缺失时可通过“同步”或再次关联同一源码重新生成。
-
-工作台提供“停止游戏”和“重启游戏”。重复运行会复用已有实例；重新构建前会停止本项目由工作台启动的游戏，释放可执行文件。通过 VS Code 或其他方式启动的游戏由对应工具管理。
-
-耗时构建可点击“取消任务”，命令行可按 Ctrl+C。取消原生构建会等待子进程退出；Creator 编辑器中已开始的资源构建会先完成，再停止后续阶段。“构建并运行”进入游戏启动阶段后，使用“停止游戏”管理实例。
-
-运行时 TS 自动同步到 `assets/__plugin_dev/<name>`，该目录由工具管理；已有 `.meta` 和 UUID 会保留，手工修改引起的冲突会阻止覆盖。
-
-插件 TS 和启停变化会自动触发资源更新。修改普通游戏脚本、场景或资源时，保留“同时更新 TS、场景和资源”勾选。原生插件启停在重新构建并重启游戏后生效。
-
-“解除引用”仅移除所选宿主的接入目录和引用，保留独立源码及该宿主的 TS 组件、资源 UUID，并将运行时开关关闭。重新构建后生效；重新关联可继续使用已有 UUID。内嵌插件使用“禁用”。
-
-生成的 `PluginProbe.ts` 可挂到场景节点测试 TS → C++ 调用。浏览器预览使用 JavaScript 回退，`native=true` 表示原生接口可用。
+- **独立源码与接入目录**：宿主根目录的 `plugin-dev.host.json` 记录插件源码相对路径与启用状态（建议纳入游戏版本控制）；宿主 `extensions/<name>` 为自动生成的接入目录，日常开发只需编辑独立源码目录。
+- **运行时 TS 同步**：插件 `runtime/` 会自动同步至宿主 `assets/__plugin_dev/<name>` 并保留已有 `.meta` UUID。模板自带的 `PluginProbe.ts` 可直接挂载到场景节点验证 TS → C++ 调用。
+- **解除引用与启停**：
+  - **禁用**：同步关闭 TS 运行时开关与 `cc_plugin.json` 的 `disabled` 标记，重新构建并重启游戏后生效。
+  - **解除引用**：移除所选宿主的接入目录与宿主配置引用，保留独立源码及宿主已导入资源的 UUID。
+- **多宿主构建**：当前打开的 Creator 项目直接调用编辑器构建服务；操作其他宿主或使用 CLI `prepare` 时会启动无头 Creator，执行前需先关闭目标项目的编辑器窗口。
 
 ## 命令行
 
@@ -69,38 +62,35 @@ node cli.cjs package --project E:/games/MyGame --name my-plugin --output-dir E:/
 node cli.cjs unlink --project E:/games/TestGame --name my-plugin
 ```
 
-`create` 同时指定 `--plugin-path` 和 `--project`，可在创建独立源码后立即关联宿主。仅指定 `--project` 时，保留在 `extensions/<name>` 内创建插件的方式。独立源码目录包含 Git 忽略规则，可以直接作为单独仓库管理。
-
-CLI 还提供 `list`、`enable`、`disable`、`sync` 和 `configure`。进度写入标准错误，结果以 JSON 写入标准输出。
-
-`restart` 使用现有构建；源码变化后应先执行 `build`。取消完成后，CLI 返回退出码 `130`。
-
-CLI `prepare` 会启动 Creator，使用前先保存并关闭对应项目；项目已打开时，使用编辑器面板准备资源。
-
-需要独立开发宿主时，可从已安装 Creator 的官方 3D 模板创建项目：
-
-```powershell
-node cli.cjs sandbox --project E:/games/PluginSandbox
-node cli.cjs install --project E:/games/PluginSandbox
-```
-
-通过 `--creator-path` 指定 Creator，通过 `--engine-path` 指定匹配的引擎源码。`sandbox` 要求目标目录不存在。
+- `create` 同时传入 `--plugin-path` 与 `--project` 时，会在创建独立源码后自动关联到该宿主；仅传 `--project` 则在宿主 `extensions/<name>` 下创建内嵌插件。
+- 其他管理命令：`list`、`enable`、`disable`、`sync`、`configure`。命令进度输出至 `stderr`，JSON 结果输出至 `stdout`。
+- 需要快速创建空白测试宿主时，可基于 Creator 官方 3D 模板生成沙盒项目：
+  ```powershell
+  node cli.cjs sandbox --project E:/games/PluginSandbox
+  node cli.cjs install --project E:/games/PluginSandbox
+  ```
 
 ## 调试与构建
 
-原生构建缓存位于 `.plugin-dev/build/windows`。默认使用 MSVC、Ninja 和 `Debug` 配置，可通过 `--compiler clang-cl` 切换编译器，通过 `--build-type Debug|RelWithDebInfo|Release`（或面板“C++ 构建配置”）切换构建配置。
+### 构建配置
 
-| 构建配置 | 原生编译 | V8 Inspector |
+原生构建缓存位于宿主 `.plugin-dev/build/windows`。默认使用 MSVC、Ninja 与 `Debug` 配置，可通过 `--compiler clang-cl` 切换编译器，通过 `--build-type Debug|RelWithDebInfo|Release` 或面板设置切换构建配置：
+
+| 构建配置 | 原生编译与引擎依赖 | V8 Inspector |
 | --- | --- | --- |
-| `Debug` | 调试信息与 Debug 引擎依赖。 | 开启，生成 TS 附加和组合调试配置。 |
-| `RelWithDebInfo` | 优化代码、调试信息与 Release 引擎依赖。 | 开启，生成 TS 附加和组合调试配置。 |
-| `Release` | Release 编译与引擎依赖。 | 关闭，工作区提供 C++ 启动配置。 |
+| `Debug` | 完整调试符号，链接并部署 Debug 引擎依赖 | 开启，生成 TS 附加与 C++ 组合调试配置 |
+| `RelWithDebInfo` | 优化代码与调试符号，链接并部署 Release 引擎依赖 | 开启，生成 TS 附加与 C++ 组合调试配置 |
+| `Release` | 发布级优化，链接并部署 Release 引擎依赖 | 关闭，仅生成 C++ 启动调试配置 |
 
-切换构建配置会清除上次成功构建标记，完成对应配置的编译后才能运行。V8 导入库和运行时 DLL 使用相同的 CMake imported target 配置。
+### 第三方依赖与运行时资源
 
-插件支持第三方依赖目录：`native/third_party/include` 自动加入头文件搜索，`native/third_party/lib/*.lib` 自动链接，`native/third_party/CMakeLists.txt` 自动引入子目录。需要按构建配置选择库时，在该 CMake 文件中声明具名 targets 及各配置对应的导入库和 DLL。
+插件模板内置第三方库约定目录：
+- `native/third_party/include`：自动加入头文件搜索路径。
+- `native/third_party/lib/*.lib`：自动链接导入库或静态库。
+- `native/third_party/CMakeLists.txt`：存在时自动通过 `add_subdirectory` 引入，可按配置声明自定义 `IMPORTED` 目标。
+- `native/third_party/bin/`、`native/windows/bin/` 及 `plugin-dev.json` 中的 `runtimeFiles`：构建时自动部署到宿主可执行文件目录，并在插件禁用或解除引用后自动清理受管文件。
 
-`native/third_party/bin/`、`native/windows/bin/` 下的文件，以及 `plugin-dev.json` 的 `runtimeFiles` 声明，均部署到宿主可执行文件目录。例如：
+`plugin-dev.json` 自定义运行时资源示例：
 
 ```json
 {
@@ -110,55 +100,42 @@ node cli.cjs install --project E:/games/PluginSandbox
 }
 ```
 
-目标路径必须位于可执行目录内，并符合 Windows 文件名规则。源文件与目标路径均检查符号链接。多插件使用相同目标时，文件内容必须相同；宿主已有文件内容不同或已部署文件被手工修改时，构建报告冲突。
+### 断点调试与类型提示
 
-`.plugin-dev/runtime-binaries.json` 按绝对输出目录记录归属、SHA-256 和引用插件。只有部署过程创建的文件可以在最后一个引用解除后清理；宿主已有的同内容文件继续保留。禁用插件或解除引用后重新构建，会检查已记录的输出目录，清理失去全部引用的受管文件。
+运行 `debug` 命令或在面板点击生成调试配置后，打开宿主 `.plugin-dev/plugin-dev.code-workspace`：
+- **C++ 智能提示与调试**：工作区自动配置 `compile_commands.json` 供 clangd 使用，并提供原生调试启动项。修改 C++ 代码后需重新编译链接并重启游戏。
+- **TypeScript 断点调试**：先启动游戏实例，再附加 V8 Inspector（默认端口 `6086`），源码映射直接指向独立插件的 `runtime/` 目录。
+- **多宿主 TypeScript 类型隔离**：每个宿主在 `.plugin-dev/typescript/` 下生成独立的类型项目与本地 TypeScript SDK。首次在 VS Code 打开工作区时，执行 **TypeScript: Select TypeScript Version → Use Workspace Version**，即可为插件源码加载当前宿主与引擎的 `cc` 类型声明。
 
-同一项目的构建与进程操作互斥。若异常退出后报告 `PROJECT_LOCK_RECOVERY_REQUIRED`，确认上次构建进程已停止，再移除报错指出的锁目录并重试。
+可通过环境变量覆盖默认工具路径：`COCOS_CREATOR_PATH`、`COCOS_PLUGIN_NODE`、`COCOS_PLUGIN_CMAKE`、`COCOS_PLUGIN_NINJA`、`COCOS_PLUGIN_CLANGD`、`COCOS_PLUGIN_CLANG_CL`、`VSWHERE_PATH`。若构建异常中断导致残留锁报错 `PROJECT_LOCK_RECOVERY_REQUIRED`，确认无后台构建进程后删除报错提示的锁目录即可。
 
-调试工作区位于 `.plugin-dev/plugin-dev.code-workspace`，根据构建配置生成 C++ 和 TS 调试入口。clangd 使用 CMake 生成的 `compile_commands.json`。
+## 模板与打包分发
 
-工作区同时包含游戏、引擎和独立插件源码，TS 路径映射指向原始 `runtime/` 文件。每个宿主生成自己的工作区和编译数据库，选择要调试的宿主对应的工作区即可。工具不修改插件源码目录的 `.clangd` 或 `.vscode`。
-
-插件模板自带 `tsconfig.json`，启用 `experimentalDecorators`。源码目录的 `.local/cc-default.d.ts` 提供稳定的基础声明，独立创建插件后即可检查模板代码。每个宿主在 `.plugin-dev/typescript/projects/` 生成自己的 TypeScript 项目，引用所选引擎的 `bin/.declarations` 和宿主 `temp/declarations`；同名声明采用所选引擎的版本。缺少引擎及宿主声明时，宿主项目使用基础 `cc` 声明。
-
-生成调试工作区时，工作台将完整 TypeScript SDK 复制到该宿主的 `.plugin-dev/typescript/node_modules/typescript`，工作区的 `typescript.tsdk` 指向此 SDK。打开工作区后，在 VS Code 执行 **TypeScript: Select TypeScript Version → Use Workspace Version**。VS Code 的信任与版本选择机制要求用户完成此确认；工作区配置启用了对应提示。使用原生 TypeScript Go 语言服务的工作区需要切换回 TypeScript SDK。
-
-该 SDK 通过标准 TypeScript language service plugin 为原始 `runtime/` 加入当前宿主的声明。每个宿主分别保存声明、SDK 和项目配置，后台同步不会改变其他宿主的声明。命令行检查可通过 `tsc --project <宿主生成的 tsconfig.json>` 指定对应项目。独立、内嵌和发布包安装后生成的 `.local/` 均包含 Git 忽略规则，源码打包排除全部 `.local/` 内容。
-
-- 先启动游戏，再附加 TS 调试器；组合启动时可能需要重试附加。
-- Inspector 默认端口为 `6086`，被占用时以游戏日志中的实际端口为准。
-- TS 断点依赖 Creator 的 source map；无法绑定时可先调试构建后的 JavaScript。
-- C++ 修改需要重新链接并重启游戏。
-
-可用环境变量覆盖工具路径：`COCOS_CREATOR_PATH`、`COCOS_PLUGIN_NODE`、`COCOS_PLUGIN_CMAKE`、`COCOS_PLUGIN_NINJA`、`COCOS_PLUGIN_CLANGD`、`COCOS_PLUGIN_CLANG_CL`、`VSWHERE_PATH`。
-
-## 模板与分发
-
-| 模板 | 功能 |
+| 模板 | 说明 |
 | --- | --- |
-| `native` | TS API、JSB 绑定与 C++ 数值调用示例。 |
-| `render` | 在原生模板上增加 Custom Pass 注册接口与执行计数；渲染图节点、推理后端和图像输出由插件实现。 |
+| `native` | 基础 TS API、JSB 绑定与 C++ 数值调用示例 |
+| `render` | 在 `native` 基础上增加 `NativePipeline` 的 `CustomComputePass` 注册与执行计数探针 |
 
-发布包通过 `contributions.builder` 注册 `editor/builder.js`，包含编辑器同步入口和 Windows 构建 hooks。将导出的插件目录放入目标游戏的 `extensions` 并启用扩展，Creator 构建会同步 TS、安装项目的 CMake Post hook，并在原生编译后部署 DLL 和模型资源。目标项目需要兼容的引擎与 Windows 工具链。
+通过 `package` 导出的插件包内含当前源码快照、资源 UUID 种子及 `contributions.builder` 构建钩子。将导出的插件目录放入其他 Creator 项目的 `extensions/` 并启用后，直接使用 Creator 正常构建 Windows 平台即可自动完成 TS 同步、CMake 挂载与运行时 DLL／资源部署，目标项目无需安装本工作台。
 
-部署支持文件保存在宿主 `.plugin-dev/native-build`，CMake 的可执行目标和默认构建目标均执行部署检查。最后一个插件禁用或解除引用后，宿主仍然保留运行资源清理入口。发布包使用这套入口完成普通 Creator 构建，无需安装开发工作台。
+需要分发已编译的原生库时，使用 `package --binary`：
 
-公共 `editor` 支持文件由当前工作台版本提供，导出过程保留插件源码与自定义编辑器入口。
+```powershell
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --output-dir E:/exports
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --build-type RelWithDebInfo --output-dir E:/exports
+```
 
-开发关联和源码发布用途不同：开发关联持续读取本地源码；发布包包含当前源码快照，不依赖开发机上的源码路径。工作台目前没有 Git 下载或包版本解析功能。
+二进制打包缺省使用该宿主最近成功构建的配置。显式 `--build-type` 必须与已完成的构建匹配；源码修改后需要重新构建。`--binary` 仅用于 `package`，`package --build-type` 必须同时指定 `--binary`。界面保存的构建配置不会改变此次打包的选择。
 
-## 开发
+导出对象是 `plugin-dev.json.target` 对应的单个 `STATIC_LIBRARY`，`cc_plugin.json.modules` 必须仅包含这个 target。其第三方静态库、DLL import library 和公开编译设置会根据 CMake 的完整链接关系一同收集。
 
-正式发布应以最终安装包完成以下验收，并保存对应引擎版本、编译器、配置、构建日志和程序输出：
+输出名称为 `<name>-<version>-windows-x64-<Config>.zip`，每个包包含一种构建配置。原生静态库及链接依赖位于 `native/windows/lib/`，公共头文件位于其 `include/{plugin,windows,third_party}/`，运行 DLL 和模型位于其 `runtime/`；`native/src/` 保留在开发源码中。TS 运行代码、编辑器入口与构建 hooks 随包分发。`native/windows/binary-manifest.json` 记录构建版本、ABI 和文件信息，安装说明见包内 `BINARY.md`。
 
-- 在全新 Creator 项目安装导出包，通过 Creator 完成资源构建和三种 Windows 原生构建，启动场景并验证真实 TS → JSB → C++ 调用结果。
-- 核对每种配置的 `.lib`、DLL、PDB、MSVC runtime 和架构，确认运行进程实际加载的依赖文件；为模型和 DLL 记录版本、许可证及 SHA-256。
-- 验证多个插件共享依赖、内容冲突、升级、禁用、解除引用及多个输出目录，确认宿主原有文件和其他插件仍在使用的文件得到保留。
-- 验证对象所有权、线程使用、资源释放和错误处理；渲染或推理插件需要验证实际图像输出、模型加载、GPU 同步和输入尺寸变化。
-- 对每个支持的 Creator／引擎版本执行安装与运行测试，再设置 `cc_plugin.json` 的 `engine-version` 范围；多宿主项目分别检查 TypeScript 类型与调试源码路径。
+`Debug` 与 `RelWithDebInfo` 使用 `/Zi` 或 `/ZI` 编译时，打包会将 compiler PDB 按原文件名放在对应静态库同目录，以便目标项目链接完整调试符号。使用 `/Z7` 编译时，调试信息包含在库内。二进制包不包含 C++ 实现源码；源码级调试需要开发者另行提供匹配的源码。
 
-这些项目是插件发布的验收条件。单元测试、CMake 配置成功和示例回调注册分别覆盖对应阶段。
+目标项目使用包内 CMake 配置链接库，构建配置、引擎或 C++ ABI 不匹配时立即报错。发布前应将 ZIP 安装到独立 Creator 项目，完成相应配置的构建、游戏启动、TS → JSB → C++ 调用与运行资源检查。
+
+## 仓库开发
 
 ```powershell
 npm ci
@@ -167,11 +144,11 @@ npm test
 
 | 目录 | 职责 |
 | --- | --- |
-| `main.js`、`panels/` | Creator 扩展入口与工作台面板。 |
-| `cli.cjs` | 命令行入口。 |
-| `lib/` | 插件管理、Windows 构建与调试配置。 |
-| `templates/` | 插件模板与运行时源码同步模块。 |
-| `tests/` | 自动测试。 |
+| `main.js`、`panels/` | Creator 扩展入口与工作台面板 |
+| `cli.cjs` | 命令行入口 |
+| `lib/` | 插件管理、Windows 构建与调试工作区生成 |
+| `templates/` | 插件模板、CMake 脚本与编辑器构建扩展支持 |
+| `tests/` | 单元与集成测试套件 |
 
 ## 许可证
 
