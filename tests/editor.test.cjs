@@ -518,6 +518,9 @@ test('panel uses safe text, sends create and unlocks only after task completion'
         const query = (selector) => panel.$.app.querySelector(selector);
         assert.equal(query('.plugin-name').textContent, '<script>unsafe</script>');
         assert.equal(query('.plugin-name script'), null);
+        assert.equal(query('#host-details').open, false);
+        assert.equal(query('#create-details').open, false);
+        assert.match(query('#create-summary-note').textContent, /已关联 1 个/);
         assert.equal(query('#refresh-assets').checked, true);
         query('#plugin-name').value = 'hello-plugin';
         query('#plugin-path').value = 'E:/plugins/hello-plugin';
@@ -631,9 +634,15 @@ test('panel host selection replaces per-host settings and exposes link/unlink so
     try {
         module.exports.ready.call(panel);
         await nextTurn();
+        assert.equal(query('#host-details').open, true);
+        assert.equal(query('#create-details').open, true);
+        assert.equal(query('#host-mode-badge').textContent, '当前项目');
         query('#host-path').value = 'E:/other-game';
         query('#host-form').dispatchEvent(new dom.window.Event('submit', { cancelable: true }));
         await nextTurn();
+        assert.equal(query('#host-details').open, true);
+        assert.equal(query('#create-details').open, false);
+        assert.equal(query('#host-mode-badge').textContent, '外部宿主');
         assert.equal(query('#editor-project-path').textContent, 'E:/open-game');
         assert.equal(query('#project-path').textContent, 'E:/other-game');
         assert.equal(query('#engine-path').value, 'E:/other-engine');
@@ -739,14 +748,25 @@ test('invalid reference rows preserve the diagnostic and offer only unlink', asy
 
 test('panel package task ignores saved buildType and exports source package cleanly', async (t) => {
     const realCore = require('../lib/core.cjs');
-    const { methods, project } = editorHarness(t, {}, realCore);
+    let packagePromise;
+    let receivedOptions;
+    const { methods, project } = editorHarness(t, {}, {
+        ...realCore,
+        packagePlugin: (options) => {
+            receivedOptions = options;
+            packagePromise = realCore.packagePlugin(options);
+            return packagePromise;
+        },
+    });
     methods.saveSettings({ buildType: 'RelWithDebInfo' });
     realCore.createPlugin({ projectPath: project, name: 'panel-pkg' });
     const started = methods.startTask('package', { name: 'panel-pkg' });
-    for (let i = 0; i < 40 && methods.getTask(started.id).status === 'running'; i++) {
-        await new Promise((resolve) => setTimeout(resolve, 25));
-    }
+    await nextTurn();
+    await packagePromise;
+    await nextTurn();
     const done = methods.getTask(started.id);
+    assert.equal(receivedOptions.buildType, undefined);
+    assert.equal(receivedOptions.binary, false);
     assert.equal(done.status, 'succeeded', done.error);
     assert.equal(done.result.binary, false);
     assert.ok(fs.existsSync(done.result.zipPath));
