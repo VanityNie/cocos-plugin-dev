@@ -37,6 +37,27 @@ function settings(panel) {
         buildType: query(panel, '#build-type').value,
     };
 }
+function switchCreateTab(panel, tabName) {
+    panel.$.app.querySelectorAll('.tab-btn').forEach((btn) => {
+        btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
+    const createForm = query(panel, '#create-form');
+    const linkForm = query(panel, '#link-form');
+    if (createForm) createForm.classList.toggle('inactive-pane', tabName !== 'create');
+    if (linkForm) linkForm.classList.toggle('inactive-pane', tabName !== 'link');
+}
+function updateToggleButtons(panel) {
+    const createDetails = query(panel, '#create-details');
+    const toggleCreate = query(panel, '#toggle-create');
+    if (createDetails && toggleCreate) {
+        toggleCreate.textContent = createDetails.open ? '收起表单' : '+ 添加插件';
+    }
+    const hostDetails = query(panel, '#host-details');
+    const toggleHost = query(panel, '#toggle-host');
+    if (hostDetails && toggleHost) {
+        toggleHost.textContent = hostDetails.open ? '收起宿主' : '切换项目';
+    }
+}
 function showTask(panel, task) {
     const previousSequence = panel._task === task.id ? panel._sequence : 0;
     if (task.sequence < previousSequence) return;
@@ -133,21 +154,29 @@ function renderPlugins(panel, plugins) {
     container.textContent = '';
     const document = container.ownerDocument;
     query(panel, '#plugin-count').textContent = `${plugins.length} 个插件`;
+    const createSummaryNote = query(panel, '#create-summary-note');
+    if (createSummaryNote) {
+        createSummaryNote.textContent = plugins.length ? `已关联 ${plugins.length} 个` : '';
+    }
     if (!plugins.length) {
-        container.appendChild(textElement(document, 'p', '此宿主还没有工作台插件。创建插件或添加已有源码的开发引用。', 'empty'));
+        container.appendChild(textElement(document, 'p', '当前项目尚未关联插件，请在上方新建或关联已有源码。', 'empty'));
         return;
     }
     for (const plugin of plugins) {
-        const row = textElement(document, 'article', '', 'plugin');
-        const info = textElement(document, 'div', '');
-        info.appendChild(textElement(document, 'div', plugin.displayName || plugin.name, 'plugin-name'));
-        if (!plugin.error) info.appendChild(textElement(document, 'div', `${plugin.name} · ${plugin.template === 'render' ? '渲染扩展' : '原生能力'}`, 'plugin-meta'));
+        const rowClass = `plugin${plugin.error ? ' has-error' : !plugin.enabled ? ' is-disabled' : ''}`;
+        const row = textElement(document, 'article', '', rowClass);
+        const info = textElement(document, 'div', '', 'plugin-info');
+        const head = textElement(document, 'div', '', 'plugin-head');
+        head.appendChild(textElement(document, 'div', plugin.displayName || plugin.name, 'plugin-name'));
+        if (!plugin.error) {
+            head.appendChild(textElement(document, 'div', `${plugin.name} · ${plugin.template === 'render' ? '渲染扩展' : '原生能力'}`, 'plugin-meta'));
+            const state = `${plugin.enabled ? '已启用' : '已禁用'}${plugin.needsRebuild ? ' · 待重新构建' : ''}`;
+            head.appendChild(textElement(document, 'div', state, `plugin-meta ${plugin.enabled ? 'enabled' : 'disabled'}`));
+        }
+        info.appendChild(head);
         info.appendChild(textElement(document, 'div', `${plugin.sourceType === 'local' ? '独立源码' : '宿主内源码'}：${plugin.pluginPath}`, 'plugin-meta plugin-source'));
         if (plugin.error) {
             info.appendChild(textElement(document, 'div', `开发引用无效：${plugin.error}`, 'plugin-meta plugin-error'));
-        } else {
-            const state = `${plugin.enabled ? '已启用' : '已禁用'}${plugin.needsRebuild ? ' · 待重新构建' : ''}`;
-            info.appendChild(textElement(document, 'div', state, `plugin-meta ${plugin.enabled ? 'enabled' : 'disabled'}`));
         }
         row.appendChild(info);
         const actions = textElement(document, 'div', '', 'plugin-actions');
@@ -156,6 +185,7 @@ function renderPlugins(panel, plugins) {
         for (const [action, title] of operations) {
             const button = textElement(document, 'button', title);
             button.type = 'button';
+            button.dataset.op = action;
             if (action !== 'source') button.setAttribute('data-mutation', '');
             button.addEventListener('click', async () => {
                 if (action === 'source') {
@@ -176,19 +206,34 @@ function applyContext(panel, context, restoreTask) {
     query(panel, '#editor-project-path').textContent = context.editorProjectPath;
     query(panel, '#project-path').textContent = context.projectPath;
     query(panel, '#host-path').value = context.projectPath;
+    const hostBadge = query(panel, '#host-mode-badge');
+    if (hostBadge) {
+        hostBadge.textContent = context.isEditorHost ? '当前项目' : '外部宿主';
+        hostBadge.className = `badge${context.isEditorHost ? '' : ' foreign'}`;
+    }
     query(panel, '#host-note').textContent = context.isEditorHost
         ? '当前操作作用于已打开的项目。添加引用后自动加载源码监视，资源构建使用当前编辑器。'
         : '当前操作作用于所选宿主，不会切换当前编辑器。资源构建前请保存并关闭该宿主的其他 Creator 窗口；打开该宿主并启用插件后启动源码监视。';
     const changedHost = panel._projectPath !== context.projectPath;
     panel._projectPath = context.projectPath;
+    const hasPlugins = Array.isArray(context.plugins) && context.plugins.length > 0;
     if (!panel._settingsLoaded || changedHost) {
         query(panel, '#engine-path').value = context.settings.enginePath || '';
         query(panel, '#creator-path').value = context.settings.creatorPath || '';
         query(panel, '#output-dir').value = context.settings.outputDir || '';
         query(panel, '#build-type').value = context.settings.buildType || 'Debug';
         query(panel, '#settings-details').open = !context.settings.enginePath;
+        const hostDetails = query(panel, '#host-details');
+        if (hostDetails) hostDetails.open = !context.isEditorHost;
+        const createDetails = query(panel, '#create-details');
+        if (createDetails) createDetails.open = !hasPlugins;
         panel._settingsLoaded = true;
+    } else if (panel._lastPluginCount === 0 && hasPlugins) {
+        const createDetails = query(panel, '#create-details');
+        if (createDetails) createDetails.open = false;
     }
+    panel._lastPluginCount = Array.isArray(context.plugins) ? context.plugins.length : 0;
+    updateToggleButtons(panel);
     const engineError = query(panel, '#engine-error');
     engineError.textContent = context.engineError || '';
     engineError.hidden = !context.engineError;
@@ -255,17 +300,40 @@ module.exports = Editor.Panel.define({
         this._closed = false;
         this._busy = false;
         this._settingsLoaded = false;
+        this._lastPluginCount = 0;
         this._sequence = 0;
         this._cancelRequested = false;
         query(this, '#refresh').addEventListener('click', () => refresh(this));
         query(this, '#cancel-task').addEventListener('click', () => cancel(this));
+        const toggleHost = query(this, '#toggle-host');
+        if (toggleHost) {
+            toggleHost.addEventListener('click', () => {
+                const details = query(this, '#host-details');
+                details.open = !details.open;
+                updateToggleButtons(this);
+            });
+        }
+        const toggleCreate = query(this, '#toggle-create');
+        if (toggleCreate) {
+            toggleCreate.addEventListener('click', () => {
+                const details = query(this, '#create-details');
+                details.open = !details.open;
+                updateToggleButtons(this);
+            });
+        }
+        this.$.app.querySelectorAll('.tab-btn').forEach((btn) => {
+            btn.addEventListener('click', () => switchCreateTab(this, btn.dataset.tab));
+        });
         query(this, '#host-form').addEventListener('submit', (event) => {
             event.preventDefault();
             selectHost(this, query(this, '#host-path').value.trim());
         });
         query(this, '#use-editor-host').addEventListener('click', () => selectHost(this, this._editorProjectPath));
         query(this, '#browse-host').addEventListener('click', () => chooseDirectory(this, '#host-path'));
-        query(this, '#browse-source').addEventListener('click', () => chooseDirectory(this, '#source-path'));
+        query(this, '#browse-source').addEventListener('click', () => {
+            switchCreateTab(this, 'link');
+            chooseDirectory(this, '#source-path');
+        });
         query(this, '#browse-plugin-parent').addEventListener('click', () => chooseDirectory(this, '#plugin-path', true));
         query(this, '#plugin-location').addEventListener('change', () => {
             const independent = query(this, '#plugin-location').value === 'independent';

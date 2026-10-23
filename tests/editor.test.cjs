@@ -634,9 +634,11 @@ test('panel host selection replaces per-host settings and exposes link/unlink so
     try {
         module.exports.ready.call(panel);
         await nextTurn();
-        assert.equal(query('#host-details').open, true);
+        assert.equal(query('#host-details').open, false);
         assert.equal(query('#create-details').open, true);
         assert.equal(query('#host-mode-badge').textContent, '当前项目');
+        query('#toggle-host').click();
+        assert.equal(query('#host-details').open, true);
         query('#host-path').value = 'E:/other-game';
         query('#host-form').dispatchEvent(new dom.window.Event('submit', { cancelable: true }));
         await nextTurn();

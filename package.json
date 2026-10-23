@@ -25,7 +25,7 @@
       "title": "插件开发 · Windows",
       "type": "dockable",
       "main": "./panels/default",
-      "size": { "min-width": 540, "min-height": 480, "width": 940, "height": 780 }
+      "size": { "min-width": 360, "min-height": 420, "width": 680, "height": 760 }
     }
   },
   "contributions": {
