@@ -12,7 +12,7 @@ const { _internal: internal } = windows;
 function fixture(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-plugin-windows-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
-    const file = (name, value = '') => { const p = path.join(root, name); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, typeof value === 'string' ? value : JSON.stringify(value)); return p; };
+    const file = (name, value = '') => { const p = path.join(root, name); fs.mkdirSync(path.dirname(p), { recursive: true }); fs.writeFileSync(p, typeof value === 'string' || Buffer.isBuffer(value) ? value : JSON.stringify(value)); return p; };
     file('package.json', { name: 'game' }); fs.mkdirSync(path.join(root, 'assets'));
     return { root, file };
 }
@@ -264,4 +264,82 @@ test('restart refuses an unbuilt host before stopping the existing owned game', 
         await assert.rejects(windows.restart({ projectPath: root }), /Build the Windows host/);
         assert.equal((await processes.inspect(started.pid)).pid, started.pid);
     } finally { await windows.stop({ projectPath: root }); }
+});
+
+test('CMake and workspace support Debug, RelWithDebInfo and Release configurations', (t) => {
+    const { root } = fixture(t);
+    assert.equal(internal.normalizeBuildType('debug'), 'Debug');
+    assert.equal(internal.normalizeBuildType('RelWithDebInfo'), 'RelWithDebInfo');
+    assert.equal(internal.normalizeBuildType('RELEASE'), 'Release');
+    assert.equal(internal.normalizeBuildType(''), null);
+    assert.throws(() => internal.normalizeBuildType(' Shipping '), /Unsupported buildType/);
+
+    const baseState = {
+        nativeSourceDir: path.join(root, 'native/engine/win64'),
+        buildDir: path.join(root, '.plugin-dev/build/windows'),
+        resourceDir: path.join(root, 'build/windows-plugin-dev'),
+        enginePath: path.join(root, 'engine'),
+        tools: { ninja: path.join(root, 'ninja.exe'), node: process.execPath },
+    };
+    for (const buildType of ['Debug', 'RelWithDebInfo', 'Release']) {
+        const args = internal.cmakeArguments({ ...baseState, buildType }, path.join(root, 'cl.exe'));
+        assert.ok(args.includes(`-DCMAKE_BUILD_TYPE:STRING=${buildType}`));
+        const ws = internal.workspaceData({ ...baseState, buildType }, root, 'cli.cjs', process.execPath, 6086);
+        assert.ok(ws.tasks.tasks[0].args.includes('--build-type'));
+        assert.ok(ws.tasks.tasks[0].args.includes(buildType));
+    }
+});
+
+test('deployRuntimeFiles stages plugin DLLs/assets, guards unmanaged files, and cleans up disabled plugins', { skip: process.platform !== 'win32' }, (t) => {
+    const { root, file } = fixture(t);
+    const core = require('../lib/core.cjs');
+    const pluginA = core.createPlugin({ pluginPath: path.join(root, '../plugin-a'), projectPath: root, name: 'plugin-a' });
+    const pluginB = core.createPlugin({ pluginPath: path.join(root, '../plugin-b'), projectPath: root, name: 'plugin-b' });
+    t.after(() => {
+        fs.rmSync(pluginA.pluginPath, { recursive: true, force: true });
+        fs.rmSync(pluginB.pluginPath, { recursive: true, force: true });
+    });
+
+    fs.mkdirSync(path.join(pluginA.pluginPath, 'native/third_party/bin'), { recursive: true });
+    const runtimeDll = fs.readFileSync(path.join(process.env.SystemRoot, 'System32/version.dll'));
+    const differentDll = fs.readFileSync(path.join(process.env.SystemRoot, 'System32/winmm.dll'));
+    fs.writeFileSync(path.join(pluginA.pluginPath, 'native/third_party/bin/version.dll'), runtimeDll);
+    fs.mkdirSync(path.join(pluginA.pluginPath, 'config'), { recursive: true });
+    fs.writeFileSync(path.join(pluginA.pluginPath, 'config/quality.json'), JSON.stringify({ quality: 'high' }));
+    const metaA = JSON.parse(fs.readFileSync(path.join(pluginA.pluginPath, 'plugin-dev.json'), 'utf8'));
+    fs.writeFileSync(path.join(pluginA.pluginPath, 'plugin-dev.json'), JSON.stringify({
+        ...metaA,
+        runtimeFiles: [{ source: 'config/quality.json', target: 'config/quality.json' }],
+    }, null, 2));
+
+    const exe = file('build/bin/Game.exe', fs.readFileSync(process.execPath));
+    file('build/bin/engine.dll', differentDll);
+    const first = internal.deployRuntimeFiles(root, exe);
+    assert.equal(first.deployed, 2);
+    assert.deepEqual(fs.readFileSync(path.join(root, 'build/bin/version.dll')), runtimeDll);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root, 'build/bin/config/quality.json'), 'utf8')), { quality: 'high' });
+
+    // 两个插件可以共同使用内容一致的 DLL。
+    fs.mkdirSync(path.join(pluginB.pluginPath, 'native/windows/bin'), { recursive: true });
+    fs.writeFileSync(path.join(pluginB.pluginPath, 'native/windows/bin/version.dll'), runtimeDll);
+    assert.equal(internal.deployRuntimeFiles(root, exe).deployed, 0);
+
+    fs.writeFileSync(path.join(pluginB.pluginPath, 'native/windows/bin/version.dll'), differentDll);
+    assert.throws(() => internal.deployRuntimeFiles(root, exe), /冲突/);
+
+    // 宿主已有文件由宿主管理。
+    fs.writeFileSync(path.join(pluginB.pluginPath, 'native/windows/bin/version.dll'), runtimeDll);
+    fs.writeFileSync(path.join(pluginB.pluginPath, 'native/windows/bin/engine.dll'), runtimeDll);
+    assert.throws(() => internal.deployRuntimeFiles(root, exe), /拒绝覆盖宿主已有文件/);
+    assert.deepEqual(fs.readFileSync(path.join(root, 'build/bin/engine.dll')), differentDll);
+    fs.unlinkSync(path.join(pluginB.pluginPath, 'native/windows/bin/engine.dll'));
+
+    // 禁用插件后删除受管文件，保留宿主文件。
+    core.setEnabled({ projectPath: root, name: 'plugin-a', enabled: false });
+    core.setEnabled({ projectPath: root, name: 'plugin-b', enabled: false });
+    const cleaned = internal.deployRuntimeFiles(root, exe);
+    assert.equal(cleaned.removed, 2);
+    assert.equal(fs.existsSync(path.join(root, 'build/bin/version.dll')), false);
+    assert.equal(fs.existsSync(path.join(root, 'build/bin/config/quality.json')), false);
+    assert.deepEqual(fs.readFileSync(path.join(root, 'build/bin/engine.dll')), differentDll);
 });

@@ -198,9 +198,10 @@ test('settings preserve unrelated values and cannot redirect the current project
     fs.mkdirSync(path.join(project, '.plugin-dev'));
     const file = path.join(project, '.plugin-dev', 'ui-settings.json');
     fs.writeFileSync(file, JSON.stringify({ custom: 'preserve', enginePath: 'old' }));
-    methods.saveSettings({ enginePath: 'new', projectPath: 'another-project' });
+    methods.saveSettings({ enginePath: 'new', buildType: 'RelWithDebInfo', projectPath: 'another-project' });
     const settings = JSON.parse(fs.readFileSync(file, 'utf8'));
     assert.equal(settings.enginePath, 'new');
+    assert.equal(settings.buildType, 'RelWithDebInfo');
     assert.equal(settings.custom, 'preserve');
     assert.equal(settings.projectPath, undefined);
 });

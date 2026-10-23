@@ -53,6 +53,7 @@
         <label>引擎源码目录<input id="engine-path" placeholder="引擎根目录，如 E:\engines\cocos-engine" autocomplete="off" /></label>
         <label>Creator 路径<input id="creator-path" placeholder="留空自动检测；或填 Creator 目录 / CocosCreator.exe" autocomplete="off" /></label>
         <label>插件导出目录<input id="output-dir" placeholder="默认 .plugin-dev/packages" autocomplete="off" /></label>
+        <label>C++ 构建配置<select id="build-type"><option value="Debug">Debug（完整调试符号 · 禁用优化）</option><option value="RelWithDebInfo">RelWithDebInfo（带符号优化 · 性能分析）</option><option value="Release">Release（发布级优化）</option></select></label>
         <div class="row"><p class="hint">配置和构建缓存保存在所选宿主 .plugin-dev 中，切换宿主会切换配置。</p><button id="save-settings" type="button" data-mutation>保存设置</button></div>
       </div>
     </details>

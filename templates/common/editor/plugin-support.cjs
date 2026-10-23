@@ -25,7 +25,7 @@ function noLinks(root, candidate) {
     let current = path.resolve(candidate);
     const limit = path.resolve(root);
     for (;;) {
-        if (fs.existsSync(current) && fs.lstatSync(current).isSymbolicLink()) fail(`不支持符号链接或目录联接: ${current}`);
+        if (fs.lstatSync(current, { throwIfNoEntry: false })?.isSymbolicLink()) fail(`不支持符号链接或目录联接: ${current}`);
         if (current === limit) break;
         current = path.dirname(current);
     }
@@ -117,6 +117,7 @@ function readState(project) {
     return state;
 }
 function walk(root, filter = () => true) {
+    noLinks(root, root);
     if (!fs.existsSync(root)) return [];
     const files = [];
     function visit(directory, relative) {
@@ -144,6 +145,29 @@ function readHost(project) {
     host.plugins = Object.assign(Object.create(null), host.plugins);
     return host;
 }
+function normalizeRelTarget(value) {
+    if (typeof value !== 'string' || !value.trim() || /[\r\n\x00-\x1f]/.test(value)) fail(`无效的运行时目标路径: ${value}`);
+    const normalized = value.replace(/\\/g, '/');
+    const parts = normalized.split('/');
+    if (!normalized || path.posix.isAbsolute(normalized) || path.win32.isAbsolute(value)
+        || parts.some(part => !part || part === '.' || part === '..' || /[:*?"<>|]/.test(part)
+            || /[. ]$/.test(part) || /^(con|prn|aux|nul|conin\$|conout\$|com[0-9¹²³]|lpt[0-9¹²³]) *(?:\.|$)/i.test(part))) {
+        fail(`无效的运行时目标路径: ${value}`);
+    }
+    return parts.join('/');
+}
+function validateRuntimeFilesSpec(pluginPath, runtimeFiles) {
+    if (runtimeFiles === undefined) return;
+    if (!Array.isArray(runtimeFiles)) fail(`插件 runtimeFiles 必须是数组: ${pluginPath}`);
+    for (const entry of runtimeFiles) {
+        const source = typeof entry === 'string' ? entry : entry && typeof entry === 'object' ? entry.source : null;
+        const target = typeof entry === 'string' ? null : entry && typeof entry === 'object' ? entry.target : null;
+        if (typeof source !== 'string' || !source.trim()) fail(`插件 runtimeFiles 条目缺少有效的 source: ${pluginPath}`);
+        if (target !== null && target !== undefined) normalizeRelTarget(target);
+        const resolved = inside(pluginPath, path.join(pluginPath, source));
+        noLinks(pluginPath, resolved);
+    }
+}
 function sourceInfo(sourcePath, expectedName) {
     const source = path.resolve(sourcePath);
     noLinks(path.parse(source).root, source);
@@ -154,6 +178,7 @@ function sourceInfo(sourcePath, expectedName) {
     validateName(meta.name);
     if (meta.managedBy !== OWNER || ![1, 2].includes(meta.schemaVersion) || (expectedName && meta.name !== expectedName)
         || (meta.schemaVersion === 1 && typeof meta.enabled !== 'boolean') || (meta.schemaVersion === 2 && Object.hasOwn(meta, 'enabled'))) fail(`插件配置不匹配: ${file}`);
+    validateRuntimeFilesSpec(source, meta.runtimeFiles);
     return { meta, sourcePath: source, pluginPath: source };
 }
 function pluginInfo(project, name) {
@@ -179,9 +204,12 @@ function adapterFiles(info, enabled) {
     const native = readJson(path.join(info.pluginPath, 'native', 'cc_plugin.json'));
     if (pkg.name !== info.meta.name || !Array.isArray(native.modules) || !native.modules.length) fail(`插件 package.json 或原生模块声明不匹配: ${info.pluginPath}`);
     const files = new Map();
-    files.set('package.json', Buffer.from(`${JSON.stringify({ ...pkg, main: './editor/main.js' }, null, 2)}\n`));
+    files.set('package.json', Buffer.from(`${JSON.stringify({ ...pkg, main: './editor/main.js', contributions: { ...pkg.contributions, builder: './editor/builder.js' } }, null, 2)}\n`));
     files.set('editor/main.js', fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').replace(/\{\{NAME\}\}/g, info.meta.name));
     files.set('editor/plugin-support.cjs', fs.readFileSync(__filename));
+    for (const file of ['builder.js', 'build-hooks.cjs', 'runtime-deployment.cjs', 'runtime-build.cmake', 'deploy-runtime.cjs', 'windows-build.cjs', 'windows-build.cmake', 'typescript-plugin.cjs']) {
+        files.set(`editor/${file}`, fs.readFileSync(path.join(__dirname, file), 'utf8').replace(/\{\{NAME\}\}/g, info.meta.name));
+    }
     files.set('native/cc_plugin.json', `${JSON.stringify({ ...native, disabled: !enabled }, null, 2)}\n`);
     for (const module of native.modules) {
         if (typeof module.target !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(module.target)) fail(`无效的原生模块 target: ${module.target}`);
@@ -227,15 +255,233 @@ function applyAdapter(plan) {
     for (const file of plan.deletes) fs.unlinkSync(file);
     writeJson(plan.marker, plan.record);
 }
-function nativeFingerprint(pluginPath) {
+function runtimeFilter(rel, item) {
+    if (item.isDirectory()) return !['build', 'out', 'cache', 'temp', '.vs', 'CMakeFiles'].includes(item.name);
+    return !/\.(obj|pdb|ilk|log|tmp|bak)$/.test(item.name) && item.name !== '.DS_Store';
+}
+function collectRuntimeFiles(pluginPath, meta) {
+    const resolvedRoot = path.resolve(pluginPath);
+    noLinks(path.parse(resolvedRoot).root, resolvedRoot);
+    const descriptor = meta || (fs.existsSync(path.join(resolvedRoot, 'plugin-dev.json')) ? readJson(path.join(resolvedRoot, 'plugin-dev.json')) : {});
+    validateRuntimeFilesSpec(resolvedRoot, descriptor.runtimeFiles);
+    const entries = new Map();
+    const recordFile = (targetRel, absSource) => {
+        const normalizedTarget = normalizeRelTarget(targetRel);
+        const key = normalizedTarget.toLowerCase();
+        const data = fs.readFileSync(absSource);
+        const sha256 = hash(data);
+        const existing = entries.get(key);
+        if (existing && existing.sha256 !== sha256) fail(`插件内部运行时文件目标冲突: ${normalizedTarget}`);
+        entries.set(key, { target: normalizedTarget, source: absSource, data, sha256 });
+    };
+    for (const binRel of ['native/third_party/bin', 'native/windows/bin']) {
+        const binDir = path.join(resolvedRoot, binRel);
+        noLinks(resolvedRoot, binDir);
+        if (!fs.existsSync(binDir)) continue;
+        for (const rel of walk(binDir, runtimeFilter)) recordFile(rel, path.join(binDir, rel));
+    }
+    for (const item of descriptor.runtimeFiles || []) {
+        const sourceRel = typeof item === 'string' ? item : item.source;
+        const targetSpec = typeof item === 'string' ? null : item.target;
+        const absSource = inside(resolvedRoot, path.join(resolvedRoot, sourceRel));
+        noLinks(resolvedRoot, absSource);
+        if (!fs.existsSync(absSource)) fail(`插件声明的运行时文件不存在: ${absSource}`);
+        if (fs.statSync(absSource).isDirectory()) {
+            const prefix = targetSpec ? normalizeRelTarget(targetSpec) : '';
+            for (const rel of walk(absSource, runtimeFilter)) {
+                recordFile(prefix ? `${prefix}/${rel}` : rel, path.join(absSource, rel));
+            }
+        } else {
+            recordFile(targetSpec ? normalizeRelTarget(targetSpec) : path.basename(absSource), absSource);
+        }
+    }
+    return [...entries.values()].sort((a, b) => a.target.localeCompare(b.target));
+}
+function nativeFingerprint(pluginPath, meta) {
     const root = path.join(pluginPath, 'native');
     const excluded = new Set(['build', 'out', 'cache', 'temp', '.vs', 'CMakeFiles']);
     const files = walk(root, (rel, item) => item.isDirectory() ? !excluded.has(item.name)
         : !/\.(obj|pdb|ilk|log|tmp)$/.test(item.name) && item.name !== 'CMakeCache.txt' && item.name !== 'compile_commands.json');
-    return hash(files.map(rel => `${rel}:${hash(fs.readFileSync(path.join(root, rel)))}`).join('\n'));
+    const entries = files.map(rel => `${rel}:${hash(fs.readFileSync(path.join(root, rel)))}`);
+    const runtimeItems = collectRuntimeFiles(pluginPath, meta);
+    const descriptor = meta || (fs.existsSync(path.join(pluginPath, 'plugin-dev.json')) ? readJson(path.join(pluginPath, 'plugin-dev.json')) : {});
+    if (Array.isArray(descriptor.runtimeFiles) && descriptor.runtimeFiles.length) {
+        for (const item of runtimeItems) entries.push(`runtime:${item.target}:${item.sha256}`);
+    }
+    return hash(entries.join('\n'));
+}
+const FALLBACK_CC_DECLARATIONS = [
+    '// 由 cocos-plugin-dev 生成；Creator 生成声明后使用宿主类型。',
+    "declare module 'cc' {",
+    '    export class Component {',
+    '        node: unknown;',
+    '        protected onLoad?(): void;',
+    '        protected start?(): void;',
+    '        protected update?(dt: number): void;',
+    '        protected lateUpdate?(dt: number): void;',
+    '        protected onEnable?(): void;',
+    '        protected onDisable?(): void;',
+    '        protected onDestroy?(): void;',
+    '    }',
+    '    export const _decorator: {',
+    '        ccclass: (name?: string) => ClassDecorator;',
+    '        property: (options?: unknown) => PropertyDecorator;',
+    '        executeInEditMode: ClassDecorator;',
+    '        menu: (path: string) => ClassDecorator;',
+    '    };',
+    '    export function log(...data: unknown[]): void;',
+    '    export function warn(...data: unknown[]): void;',
+    '    export function error(...data: unknown[]): void;',
+    '}',
+    '',
+].join('\n');
+function discoverHostEngine(project, explicitEnginePath) {
+    if (explicitEnginePath) return explicitEnginePath;
+    if (!project) return null;
+    for (const rel of ['.plugin-dev/windows.json', '.plugin-dev/ui-settings.json']) {
+        const file = path.join(project, rel);
+        if (!fs.existsSync(file)) continue;
+        noLinks(project, file);
+        const data = readJson(file);
+        if (typeof data.enginePath === 'string' && data.enginePath.trim()) return data.enginePath.trim();
+    }
+    return null;
+}
+function syncTypeDeclarations(project, pluginPath, explicitEnginePath) {
+    const resolvedPlugin = path.resolve(pluginPath);
+    noLinks(path.parse(resolvedPlugin).root, resolvedPlugin);
+    const localDir = path.join(resolvedPlugin, '.local');
+    const defaultFile = path.join(localDir, 'cc-default.d.ts');
+    const ignoreFile = path.join(localDir, '.gitignore');
+    noLinks(resolvedPlugin, ignoreFile);
+    const ignore = fs.existsSync(ignoreFile) ? fs.readFileSync(ignoreFile, 'utf8') : '';
+    if (ignore !== '*\n' && !ignore.endsWith('\n*\n')) write(ignoreFile, `${ignore}${ignore && !ignore.endsWith('\n') ? '\n' : ''}*\n`);
+    noLinks(resolvedPlugin, defaultFile);
+    write(defaultFile, FALLBACK_CC_DECLARATIONS.split('\n').filter(line => line !== "declare module 'cc' {" && line !== '}').join('\n'));
+    const configFile = path.join(resolvedPlugin, 'tsconfig.json');
+    noLinks(resolvedPlugin, configFile);
+    const config = readJson(configFile);
+    config.include = (config.include || ['runtime/**/*.ts']).filter(entry => entry !== '.local/**/*.d.ts');
+    if (config.files) config.files = config.files.filter(entry => !['.local/cc-host.d.ts', './.local/cc-host.d.ts'].includes(entry));
+    config.compilerOptions ||= {};
+    config.compilerOptions.paths ||= {};
+    config.compilerOptions.paths.cc ||= ['./.local/cc-default.d.ts'];
+    config.compilerOptions.plugins ||= [];
+    if (!config.compilerOptions.plugins.some(plugin => plugin.name === 'cocos-plugin-dev-types')) config.compilerOptions.plugins.push({ name: 'cocos-plugin-dev-types' });
+    writeJson(configFile, config);
+    const legacyFile = path.join(localDir, 'cc-host.d.ts');
+    noLinks(resolvedPlugin, legacyFile);
+    if (fs.existsSync(legacyFile)) {
+        const legacy = fs.readFileSync(legacyFile, 'utf8');
+        if (legacy.startsWith('// Generated by cocos-plugin-dev.') || legacy === FALLBACK_CC_DECLARATIONS) fs.unlinkSync(legacyFile);
+        else fail(`已有类型文件包含手工修改，请将声明移入 runtime 后继续: ${legacyFile}`);
+    }
+    if (!project && !explicitEnginePath) return { targetFile: defaultFile, configFile, declarationCount: 0, mode: 'fallback' };
+    const resolvedProject = project ? path.resolve(project) : undefined;
+    if (resolvedProject) ensureLocalIgnore(resolvedProject);
+    const typesRoot = resolvedProject ? path.join(resolvedProject, '.plugin-dev', 'typescript') : path.join(localDir, 'typescript');
+    const typeDirectory = path.join(typesRoot, 'projects', hash(resolvedPlugin.toLowerCase()).slice(0, 16));
+    const targetFile = path.join(typeDirectory, 'cc-host.d.ts');
+    noLinks(path.parse(typesRoot).root, targetFile);
+    const dtsFiles = [];
+    const seenNames = new Set();
+    const engine = discoverHostEngine(project, explicitEnginePath);
+    if (engine) {
+        const resolvedEngine = path.resolve(engine);
+        const engineRoot = path.basename(resolvedEngine).toLowerCase() === 'native' ? path.dirname(resolvedEngine) : resolvedEngine;
+        const engineDecl = path.join(engineRoot, 'bin', '.declarations');
+        if (fs.existsSync(engineDecl)) {
+            noLinks(path.parse(engineDecl).root, engineDecl);
+            for (const rel of walk(engineDecl, (r, item) => item.isDirectory() || r.endsWith('.d.ts'))) {
+                const base = path.basename(rel).toLowerCase();
+                if (!seenNames.has(base)) {
+                    dtsFiles.push(path.join(engineDecl, rel));
+                    seenNames.add(base);
+                }
+            }
+        }
+    }
+    if (project) {
+        const tempDecl = path.join(resolvedProject, 'temp', 'declarations');
+        if (fs.existsSync(tempDecl)) {
+            noLinks(resolvedProject, tempDecl);
+            for (const rel of walk(tempDecl, (r, item) => item.isDirectory() || r.endsWith('.d.ts'))) {
+                const base = path.basename(rel).toLowerCase();
+                if (!seenNames.has(base)) {
+                    dtsFiles.push(path.join(tempDecl, rel));
+                    seenNames.add(base);
+                }
+            }
+        }
+    }
+    if (dtsFiles.length) {
+        const lines = ['// 由 cocos-plugin-dev 生成；本文件属于当前宿主的 TypeScript 项目。'];
+        for (const dts of dtsFiles) {
+            const rel = path.relative(typeDirectory, dts);
+            const ref = (path.isAbsolute(rel) ? dts : rel).replace(/\\/g, '/');
+            if (/["<>\r\n]/.test(ref)) fail(`类型声明路径含有不支持的字符: ${dts}`);
+            lines.push(`/// <reference path="${ref}" />`);
+        }
+        write(targetFile, `${lines.join('\n')}\n`);
+    } else write(targetFile, FALLBACK_CC_DECLARATIONS);
+    const hostConfig = path.join(typeDirectory, 'tsconfig.json');
+    noLinks(path.parse(typesRoot).root, hostConfig);
+    writeJson(hostConfig, {
+        extends: configFile.replace(/\\/g, '/'),
+        files: [targetFile.replace(/\\/g, '/')],
+        include: [path.join(resolvedPlugin, 'runtime', '**', '*.ts').replace(/\\/g, '/')],
+        exclude: [],
+    });
+    const moduleDirectory = path.join(typesRoot, 'node_modules', 'cocos-plugin-dev-types');
+    const manifestFile = path.join(moduleDirectory, 'projects.json');
+    noLinks(path.parse(typesRoot).root, manifestFile);
+    const manifest = fs.existsSync(manifestFile) ? readJson(manifestFile) : {};
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) fail(`TypeScript 宿主项目记录无效: ${manifestFile}`);
+    manifest[configFile.replace(/\\/g, '/').toLowerCase()] = targetFile.replace(/\\/g, '/');
+    writeJson(manifestFile, manifest);
+    const packageFile = path.join(moduleDirectory, 'package.json');
+    const moduleFile = path.join(moduleDirectory, 'index.cjs');
+    noLinks(path.parse(typesRoot).root, packageFile);
+    noLinks(path.parse(typesRoot).root, moduleFile);
+    writeJson(packageFile, { name: 'cocos-plugin-dev-types', version: '1.0.0', main: 'index.cjs' });
+    write(moduleFile, fs.readFileSync(path.join(__dirname, 'typescript-plugin.cjs')));
+    return { targetFile, configFile: hostConfig, pluginProbeLocation: typesRoot, declarationCount: dtsFiles.length, mode: dtsFiles.length ? 'referenced' : 'fallback' };
 }
 function enabledRuntime(enabled) {
     return Buffer.from(`// Generated by cocos-plugin-dev. Edit runtime/ sources, not this directory.\nexport const PLUGIN_ENABLED = ${enabled};\n`);
+}
+function prepareTypeScriptSdk(projectPath, packageRoot) {
+    const project = projectRoot(projectPath);
+    const source = path.resolve(packageRoot);
+    noLinks(path.parse(source).root, source);
+    const packageInfo = readJson(path.join(source, 'package.json'));
+    if (packageInfo.name !== 'typescript' || typeof packageInfo.version !== 'string'
+        || !fs.existsSync(path.join(source, 'lib', 'tsserver.js'))) fail(`需要完整的官方 TypeScript npm 包: ${source}`);
+    ensureLocalIgnore(project);
+    const typesRoot = path.join(project, '.plugin-dev', 'typescript');
+    const destination = path.join(typesRoot, 'node_modules', 'typescript');
+    const recordFile = path.join(typesRoot, 'sdk-files.json');
+    noLinks(project, recordFile);
+    noLinks(project, destination);
+    const previous = fs.existsSync(recordFile) ? readJson(recordFile) : { schemaVersion: 1, files: {} };
+    if (previous.schemaVersion !== 1 || !previous.files || typeof previous.files !== 'object') fail(`TypeScript SDK 文件记录无效: ${recordFile}`);
+    const desired = new Map(walk(source).map(rel => [rel, fs.readFileSync(path.join(source, rel))]));
+    const files = Object.fromEntries([...desired].map(([rel, data]) => [rel, hash(data)]));
+    for (const rel of new Set([...Object.keys(previous.files), ...desired.keys()])) {
+        const file = inside(destination, path.join(destination, rel));
+        noLinks(project, file);
+        if (fs.existsSync(file)) {
+            const actual = hash(fs.readFileSync(file));
+            if (actual !== previous.files[rel] && actual !== files[rel]) fail(`TypeScript SDK 文件包含手工修改: ${file}`);
+        }
+    }
+    for (const [rel, data] of desired) write(path.join(destination, rel), data);
+    for (const rel of Object.keys(previous.files)) {
+        const file = path.join(destination, rel);
+        if (!desired.has(rel) && fs.existsSync(file)) fs.unlinkSync(file);
+    }
+    writeJson(recordFile, { schemaVersion: 1, version: packageInfo.version, files });
+    return { packageRoot: destination, sdkPath: path.join(destination, 'lib'), version: packageInfo.version };
 }
 function prepareSync(projectPath, name, enabledOverride, initialInfo) {
     const project = projectRoot(projectPath);
@@ -290,7 +536,7 @@ function prepareSync(projectPath, name, enabledOverride, initialInfo) {
     const native = readJson(nativeFile);
     // Inspect the whole native source tree before any mutation, so an unsupported
     // linked dependency cannot cause an enable operation to fail halfway through.
-    nativeFingerprint(info.pluginPath);
+    nativeFingerprint(info.pluginPath, info.meta);
     const adapter = info.sourceType === 'local' ? prepareAdapter(project, info, enabled, createAdapter) : undefined;
     return { project, info, enabled, state, previous, nextTracked, writes, deletes, nativeFile, native, adapter };
 }
@@ -311,7 +557,8 @@ function applySync(plan) {
         writeJson(path.join(info.pluginPath, 'plugin-dev.json'), info.meta);
         writeJson(plan.nativeFile, plan.native);
     }
-    const fingerprint = nativeFingerprint(info.pluginPath);
+    syncTypeDeclarations(project, info.pluginPath);
+    const fingerprint = nativeFingerprint(info.pluginPath, info.meta);
     const assetsChanged = enableChanged || plan.writes.length > 0 || plan.deletes.length > 0;
     state.plugins[info.meta.name] = {
         ...previous, enabled, template: info.meta.template, target: info.meta.target, sourcePath: info.pluginPath, detached: false,
@@ -338,4 +585,4 @@ function setEnabled({ projectPath, name, enabled }) {
     const project = projectRoot(projectPath);
     return withProjectLock(project, () => applySync(prepareSync(project, name, enabled)));
 }
-module.exports = { OWNER, validateName, inside, noLinks, projectRoot, readJson, write, writeJson, hash, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };
+module.exports = { OWNER, validateName, inside, noLinks, projectRoot, readJson, write, writeJson, hash, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, collectRuntimeFiles, syncTypeDeclarations, prepareTypeScriptSdk, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };

@@ -32,6 +32,7 @@ test('CLI accepts explicit values and rejects misspelled or ambiguous flags', ()
     assert.throws(() => parseArgs(['create', '--projet', '.']), /Unknown/);
     assert.equal(parseArgs(['create', '--plugin-path', './plugin']).options.pluginPath, path.resolve('plugin'));
     assert.equal(parseArgs(['link', '--source-path', './plugin']).options.sourcePath, path.resolve('plugin'));
+    assert.equal(parseArgs(['build', '--project', '.', '--build-type', 'RelWithDebInfo']).options.buildType, 'RelWithDebInfo');
 });
 
 test('CLI creates independent source, attaches two hosts and keeps enable state local', t => {

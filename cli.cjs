@@ -34,6 +34,7 @@ Options:
   --creator-path <CocosCreator.exe>  Select Creator
   --engine-path <engine root>       Select native engine (must match built JS assets)
   --compiler msvc|clang-cl          Windows compiler
+  --build-type Debug|RelWithDebInfo|Release  CMake build configuration (default: Debug)
   --display-name <label>            Plugin display name
   --native-source-dir <directory>   Explicit generated Windows CMake source
   --resource-dir <directory>        Explicit Creator Windows build resources
@@ -49,7 +50,7 @@ function parseArgs(argv) {
         project: 'projectPath', name: 'name', template: 'template',
         'display-name': 'displayName', 'output-dir': 'outputDir',
         'creator-path': 'creatorPath', 'engine-path': 'enginePath',
-        compiler: 'compiler', 'native-source-dir': 'nativeSourceDir',
+        compiler: 'compiler', 'build-type': 'buildType', 'native-source-dir': 'nativeSourceDir',
         'resource-dir': 'resourceDir',
         'plugin-path': 'pluginPath', 'source-path': 'sourcePath',
     };

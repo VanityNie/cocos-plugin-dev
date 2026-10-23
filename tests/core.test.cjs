@@ -247,6 +247,7 @@ test('tool install supports owned upgrades and refuses unrelated or edited files
     const source = path.join(root, 'tool-source');
     put(path.join(source, 'package.json'), JSON.stringify({ name: 'cocos-plugin-dev', version: '0.1.0' }));
     put(path.join(source, 'main.js'), 'module.exports = {};');
+    put(path.join(source, 'node_modules/typescript/package.json'), JSON.stringify({ name: 'typescript', version: '5.9.3' }));
     put(path.join(source, '.local/private.txt'), 'do not ship');
     const installed = core.installTools({ projectPath, sourcePath: source });
     assert.equal(fs.existsSync(path.join(installed.path, '.local')), false);
@@ -534,4 +535,74 @@ test('watcher setup failure closes already opened source watchers and rejects ex
     assert.equal(closed, 1);
     exports.unload();
     assert.equal(closed, 1);
+});
+
+test('插件创建生成独立的源码类型环境与宿主类型项目', t => {
+    const { root, projectPath, project } = fixture(t);
+    const pluginPath = path.join(root, 'typed-plugin');
+    const created = core.createPlugin({ pluginPath, name: 'typed-plugin' });
+    const tsconfig = readJson(path.join(pluginPath, 'tsconfig.json'));
+    assert.equal(tsconfig.compilerOptions.experimentalDecorators, true);
+    assert.ok(!tsconfig.include.includes('.local/**/*.d.ts'));
+    const fallbackFile = path.join(pluginPath, '.local/cc-default.d.ts');
+    const defaultTypes = fs.readFileSync(fallbackFile, 'utf8');
+    assert.match(defaultTypes, /export class Component/);
+    core.linkPlugin({ projectPath, sourcePath: pluginPath });
+    const support = require('../templates/common/editor/plugin-support.cjs');
+    const first = support.syncTypeDeclarations(projectPath, pluginPath);
+    const secondHost = project('engine-only-host');
+    core.linkPlugin({ projectPath: secondHost, sourcePath: pluginPath });
+    const second = support.syncTypeDeclarations(secondHost, pluginPath);
+    assert.notEqual(first.configFile, second.configFile);
+    assert.notEqual(first.targetFile, second.targetFile);
+    assert.equal(fs.readFileSync(fallbackFile, 'utf8'), defaultTypes);
+    assert.match(fs.readFileSync(first.targetFile, 'utf8'), /declare module 'cc'/);
+    assert.match(fs.readFileSync(second.targetFile, 'utf8'), /declare module 'cc'/);
+
+    const packaged = core.packagePlugin({ projectPath, name: 'typed-plugin' });
+    assert.equal(fs.existsSync(path.join(packaged.packagePath, 'tsconfig.json')), true);
+    assert.equal(fs.existsSync(path.join(packaged.packagePath, '.local')), false);
+    assert.equal(created.pluginPath, pluginPath);
+});
+
+test('third_party CMake hooks and runtimeFiles validation track native binary fingerprints', t => {
+    const { root, projectPath } = fixture(t);
+    const pluginPath = path.join(root, 'inference-plugin');
+    const plugin = core.createPlugin({ pluginPath, projectPath, name: 'inference-plugin', template: 'render' });
+    const cmake = fs.readFileSync(path.join(pluginPath, 'native/src/CMakeLists.txt'), 'utf8');
+    assert.match(cmake, /third_party\/include/);
+    assert.match(cmake, /third_party\/lib\/\*\.lib/);
+    assert.match(cmake, /third_party\/CMakeLists\.txt/);
+
+    const stateFile = path.join(projectPath, '.plugin-dev/state.json');
+    const markClean = () => {
+        const state = readJson(stateFile);
+        state.plugins['inference-plugin'].needsRebuild = false;
+        state.plugins['inference-plugin'].assetsDirty = false;
+        put(stateFile, JSON.stringify(state));
+    };
+    markClean();
+    assert.equal(core.listPlugins({ projectPath })[0].needsRebuild, false);
+
+    put(path.join(pluginPath, 'native/third_party/bin/runtime-settings.json'), JSON.stringify({ quality: 'high' }));
+    assert.equal(core.listPlugins({ projectPath })[0].needsRebuild, true);
+    core.syncPlugin({ projectPath, name: 'inference-plugin' });
+    markClean();
+
+    const metaFile = path.join(pluginPath, 'plugin-dev.json');
+    const meta = readJson(metaFile);
+    put(path.join(pluginPath, 'models/settings.json'), JSON.stringify({ scale: 2 }));
+    put(metaFile, JSON.stringify({ ...meta, runtimeFiles: [{ source: 'models/settings.json', target: 'models/settings.json' }] }, null, 2));
+    assert.equal(core.listPlugins({ projectPath })[0].needsRebuild, true);
+    core.syncPlugin({ projectPath, name: 'inference-plugin' });
+    markClean();
+
+    put(path.join(pluginPath, 'models/settings.json'), JSON.stringify({ scale: 4 }));
+    assert.equal(core.listPlugins({ projectPath })[0].needsRebuild, true);
+
+    put(metaFile, JSON.stringify({ ...meta, runtimeFiles: [{ source: '../outside.dll', target: 'outside.dll' }] }, null, 2));
+    assert.throws(() => core.syncPlugin({ projectPath, name: 'inference-plugin' }), /路径越界/);
+    put(metaFile, JSON.stringify({ ...meta, runtimeFiles: [{ source: 'models/settings.json', target: '../escape.json' }] }, null, 2));
+    assert.throws(() => core.syncPlugin({ projectPath, name: 'inference-plugin' }), /无效的运行时目标路径/);
+    assert.ok(plugin.target);
 });

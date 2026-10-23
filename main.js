@@ -53,12 +53,12 @@ function readSettings(project) {
         }
     }
     const creator = /cocoscreator\.exe$/i.test(process.execPath) ? process.execPath : '';
-    return { enginePath: '', creatorPath: creator, outputDir: path.join(project, '.plugin-dev', 'packages'), ...saved };
+    return { enginePath: '', creatorPath: creator, outputDir: path.join(project, '.plugin-dev', 'packages'), buildType: 'Debug', ...saved };
 }
 
 function cleanSettings(values) {
     const result = {};
-    for (const key of ['enginePath', 'creatorPath', 'outputDir']) {
+    for (const key of ['enginePath', 'creatorPath', 'outputDir', 'buildType']) {
         if (typeof values[key] === 'string') result[key] = values[key].trim();
     }
     return result;
@@ -233,6 +233,8 @@ async function execute(task, input, settings) {
         projectPath: task.projectPath,
         ...(settings.enginePath ? { enginePath: settings.enginePath } : {}),
         ...(settings.creatorPath ? { creatorPath: settings.creatorPath } : {}),
+        ...(settings.buildType ? { buildType: settings.buildType } : {}),
+        ...(input.buildType ? { buildType: input.buildType } : {}),
         onOutput: (value) => append(task, value),
         ...(isEditorHost(task.projectPath) ? { prepareAssets: (request) => prepareInEditor(task, request) } : {}),
         signal: task.controller.signal,

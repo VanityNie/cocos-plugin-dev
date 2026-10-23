@@ -18,10 +18,11 @@ Creator 使用的 JS 引擎与原生构建使用的 C++ 引擎必须匹配。使
 ```powershell
 git clone https://github.com/VanityNie/cocos-plugin-dev.git
 cd cocos-plugin-dev
+npm ci
 node cli.cjs install --project E:/games/MyGame
 ```
 
-将示例路径替换为游戏项目路径。在 Creator 扩展管理器中扫描并启用 `cocos-plugin-dev`，打开 **开发者 → 插件开发**。安装和使用无需下载 npm 依赖。
+将示例路径替换为游戏项目路径。`npm ci` 安装工作台需要的完整 TypeScript SDK，安装命令会将该依赖一并复制到游戏项目。在 Creator 扩展管理器中扫描并启用 `cocos-plugin-dev`，打开 **开发者 → 插件开发**。
 
 ## 使用
 
@@ -87,15 +88,43 @@ node cli.cjs install --project E:/games/PluginSandbox
 
 ## 调试与构建
 
-原生构建缓存位于 `.plugin-dev/build/windows`。默认使用 MSVC 和 Ninja，可通过 `--compiler clang-cl` 切换编译器。
+原生构建缓存位于 `.plugin-dev/build/windows`。默认使用 MSVC、Ninja 和 `Debug` 配置，可通过 `--compiler clang-cl` 切换编译器，通过 `--build-type Debug|RelWithDebInfo|Release`（或面板“C++ 构建配置”）切换构建配置。
+
+| 构建配置 | 原生编译 | V8 Inspector |
+| --- | --- | --- |
+| `Debug` | 调试信息与 Debug 引擎依赖。 | 开启，生成 TS 附加和组合调试配置。 |
+| `RelWithDebInfo` | 优化代码、调试信息与 Release 引擎依赖。 | 开启，生成 TS 附加和组合调试配置。 |
+| `Release` | Release 编译与引擎依赖。 | 关闭，工作区提供 C++ 启动配置。 |
+
+切换构建配置会清除上次成功构建标记，完成对应配置的编译后才能运行。V8 导入库和运行时 DLL 使用相同的 CMake imported target 配置。
+
+插件支持第三方依赖目录：`native/third_party/include` 自动加入头文件搜索，`native/third_party/lib/*.lib` 自动链接，`native/third_party/CMakeLists.txt` 自动引入子目录。需要按构建配置选择库时，在该 CMake 文件中声明具名 targets 及各配置对应的导入库和 DLL。
+
+`native/third_party/bin/`、`native/windows/bin/` 下的文件，以及 `plugin-dev.json` 的 `runtimeFiles` 声明，均部署到宿主可执行文件目录。例如：
+
+```json
+{
+  "runtimeFiles": [
+    { "source": "models/upscaler.onnx", "target": "models/upscaler.onnx" }
+  ]
+}
+```
+
+目标路径必须位于可执行目录内，并符合 Windows 文件名规则。源文件与目标路径均检查符号链接。多插件使用相同目标时，文件内容必须相同；宿主已有文件内容不同或已部署文件被手工修改时，构建报告冲突。
+
+`.plugin-dev/runtime-binaries.json` 按绝对输出目录记录归属、SHA-256 和引用插件。只有部署过程创建的文件可以在最后一个引用解除后清理；宿主已有的同内容文件继续保留。禁用插件或解除引用后重新构建，会检查已记录的输出目录，清理失去全部引用的受管文件。
 
 同一项目的构建与进程操作互斥。若异常退出后报告 `PROJECT_LOCK_RECOVERY_REQUIRED`，确认上次构建进程已停止，再移除报错指出的锁目录并重试。
 
-调试工作区位于 `.plugin-dev/plugin-dev.code-workspace`，包含 C++ 启动和 V8 Inspector 附加配置。clangd 使用 CMake 生成的 `compile_commands.json`。
+调试工作区位于 `.plugin-dev/plugin-dev.code-workspace`，根据构建配置生成 C++ 和 TS 调试入口。clangd 使用 CMake 生成的 `compile_commands.json`。
 
 工作区同时包含游戏、引擎和独立插件源码，TS 路径映射指向原始 `runtime/` 文件。每个宿主生成自己的工作区和编译数据库，选择要调试的宿主对应的工作区即可。工具不修改插件源码目录的 `.clangd` 或 `.vscode`。
 
-独立源码的 TS 编辑器类型环境需在插件自己的 `tsconfig.json` 中配置；工作区暂不自动关联宿主的 `cc` 类型声明。此限制影响源码中的类型检查与补全，运行资源仍由宿主 Creator 构建。
+插件模板自带 `tsconfig.json`，启用 `experimentalDecorators`。源码目录的 `.local/cc-default.d.ts` 提供稳定的基础声明，独立创建插件后即可检查模板代码。每个宿主在 `.plugin-dev/typescript/projects/` 生成自己的 TypeScript 项目，引用所选引擎的 `bin/.declarations` 和宿主 `temp/declarations`；同名声明采用所选引擎的版本。缺少引擎及宿主声明时，宿主项目使用基础 `cc` 声明。
+
+生成调试工作区时，工作台将完整 TypeScript SDK 复制到该宿主的 `.plugin-dev/typescript/node_modules/typescript`，工作区的 `typescript.tsdk` 指向此 SDK。打开工作区后，在 VS Code 执行 **TypeScript: Select TypeScript Version → Use Workspace Version**。VS Code 的信任与版本选择机制要求用户完成此确认；工作区配置启用了对应提示。使用原生 TypeScript Go 语言服务的工作区需要切换回 TypeScript SDK。
+
+该 SDK 通过标准 TypeScript language service plugin 为原始 `runtime/` 加入当前宿主的声明。每个宿主分别保存声明、SDK 和项目配置，后台同步不会改变其他宿主的声明。命令行检查可通过 `tsc --project <宿主生成的 tsconfig.json>` 指定对应项目。独立、内嵌和发布包安装后生成的 `.local/` 均包含 Git 忽略规则，源码打包排除全部 `.local/` 内容。
 
 - 先启动游戏，再附加 TS 调试器；组合启动时可能需要重试附加。
 - Inspector 默认端口为 `6086`，被占用时以游戏日志中的实际端口为准。
@@ -111,11 +140,25 @@ node cli.cjs install --project E:/games/PluginSandbox
 | `native` | TS API、JSB 绑定与 C++ 数值调用示例。 |
 | `render` | 在原生模板上增加 Custom Pass 注册接口与执行计数；渲染图节点、推理后端和图像输出由插件实现。 |
 
-发布包自带编辑器同步入口。将导出的插件目录放入目标游戏的 `extensions` 并启用，即可使用官方原生构建流程。目标项目需要兼容的引擎与 Windows 工具链。
+发布包通过 `contributions.builder` 注册 `editor/builder.js`，包含编辑器同步入口和 Windows 构建 hooks。将导出的插件目录放入目标游戏的 `extensions` 并启用扩展，Creator 构建会同步 TS、安装项目的 CMake Post hook，并在原生编译后部署 DLL 和模型资源。目标项目需要兼容的引擎与 Windows 工具链。
+
+部署支持文件保存在宿主 `.plugin-dev/native-build`，CMake 的可执行目标和默认构建目标均执行部署检查。最后一个插件禁用或解除引用后，宿主仍然保留运行资源清理入口。发布包使用这套入口完成普通 Creator 构建，无需安装开发工作台。
+
+公共 `editor` 支持文件由当前工作台版本提供，导出过程保留插件源码与自定义编辑器入口。
 
 开发关联和源码发布用途不同：开发关联持续读取本地源码；发布包包含当前源码快照，不依赖开发机上的源码路径。工作台目前没有 Git 下载或包版本解析功能。
 
 ## 开发
+
+正式发布应以最终安装包完成以下验收，并保存对应引擎版本、编译器、配置、构建日志和程序输出：
+
+- 在全新 Creator 项目安装导出包，通过 Creator 完成资源构建和三种 Windows 原生构建，启动场景并验证真实 TS → JSB → C++ 调用结果。
+- 核对每种配置的 `.lib`、DLL、PDB、MSVC runtime 和架构，确认运行进程实际加载的依赖文件；为模型和 DLL 记录版本、许可证及 SHA-256。
+- 验证多个插件共享依赖、内容冲突、升级、禁用、解除引用及多个输出目录，确认宿主原有文件和其他插件仍在使用的文件得到保留。
+- 验证对象所有权、线程使用、资源释放和错误处理；渲染或推理插件需要验证实际图像输出、模型加载、GPU 同步和输入尺寸变化。
+- 对每个支持的 Creator／引擎版本执行安装与运行测试，再设置 `cc_plugin.json` 的 `engine-version` 范围；多宿主项目分别检查 TypeScript 类型与调试源码路径。
+
+这些项目是插件发布的验收条件。单元测试、CMake 配置成功和示例回调注册分别覆盖对应阶段。
 
 ```powershell
 npm ci

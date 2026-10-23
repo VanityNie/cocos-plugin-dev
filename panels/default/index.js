@@ -27,13 +27,14 @@ function notice(panel, text, kind = 'error') {
 }
 function busy(panel, value) {
     panel._busy = value;
-    panel.$.app.querySelectorAll('[data-mutation], #save-settings, .settings input').forEach((element) => { element.disabled = value; });
+    panel.$.app.querySelectorAll('[data-mutation], #save-settings, .settings input, .settings select').forEach((element) => { element.disabled = value; });
 }
 function settings(panel) {
     return {
         enginePath: query(panel, '#engine-path').value,
         creatorPath: query(panel, '#creator-path').value,
         outputDir: query(panel, '#output-dir').value,
+        buildType: query(panel, '#build-type').value,
     };
 }
 function showTask(panel, task) {
@@ -184,6 +185,7 @@ function applyContext(panel, context, restoreTask) {
         query(panel, '#engine-path').value = context.settings.enginePath || '';
         query(panel, '#creator-path').value = context.settings.creatorPath || '';
         query(panel, '#output-dir').value = context.settings.outputDir || '';
+        query(panel, '#build-type').value = context.settings.buildType || 'Debug';
         query(panel, '#settings-details').open = !context.settings.enginePath;
         panel._settingsLoaded = true;
     }

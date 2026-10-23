@@ -1,6 +1,6 @@
 # 架构
 
-工作台将 Creator 编辑器扩展、运行时 TS 和原生 C++ 组织为一个插件包，并使用选定游戏作为运行与调试宿主。独立源码可被多个宿主引用，宿主之间不共享启用状态或构建缓存。原生编译和加载沿用 [Cocos 官方插件机制](https://docs.cocos.com/creator/4.0/manual/zh/advanced-topics/native-plugins/tutorial.html)。
+工作台将 Creator 编辑器扩展、运行时 TS 和原生 C++ 组织为一个插件包，并使用选定游戏作为运行与调试宿主。独立源码可被多个宿主引用，各宿主分别保存启用状态、类型项目和构建缓存。原生编译和加载沿用 Cocos 的 `cc_plugin.json`、CMake 和 `CC_PLUGIN_ENTRY` 机制。
 
 ## 独立源码与宿主
 
@@ -42,7 +42,7 @@ flowchart LR
 
 | 配置或阶段 | 职责 |
 | --- | --- |
-| `package.json` | 声明编辑器入口，加载运行时源码同步模块。 |
+| `package.json` | 声明编辑器入口和 `contributions.builder`，加载源码同步与 Windows 构建 hooks。 |
 | `plugin-dev.json` | 保存插件名称、模板和目标；旧版内嵌格式还保存启用配置。 |
 | `plugin-dev.host.json` | 保存当前游戏对独立源码的引用及启用配置。 |
 | `cc_plugin.json` | 声明原生模块、目标平台和启用状态，供官方构建扫描。 |
@@ -65,6 +65,10 @@ flowchart LR
 | `lib/core.cjs` | 生成插件、安装工作台、管理插件和打包。 |
 | `lib/windows.cjs` | 探测工具链、准备宿主、配置与构建 C++、生成调试工作区。 |
 | `templates/common/editor/plugin-support.cjs` | 同步运行时文件、检测冲突、记录变更和启停状态；随生成的插件分发。 |
+| `templates/common/editor/typescript-plugin.cjs` | 通过 TypeScript `getExternalFiles` 为原始源码项目加载当前宿主的声明。 |
+| `templates/common/editor/runtime-deployment.cjs` | 校验运行资源归属、内容冲突和部署目录，执行复制及清理。 |
+| `templates/common/editor/builder.js`、`build-hooks.cjs` | 接入 Creator 构建阶段，同步 TS、配置 CMake 部署入口并检查构建结果。 |
+| `templates/common/editor/windows-build.cmake`、`runtime-build.cmake` | 选择匹配配置的 V8 DLL，在宿主可执行目标和默认目标构建时执行部署。 |
 
 耗时操作先返回任务编号，面板再读取日志和完成状态。面板在原生构建期间禁用其他写入操作。构建过程中发生的新修改保留为待构建状态。
 
@@ -76,9 +80,31 @@ flowchart LR
 
 插件的编辑入口是源码目录中的 `runtime` 和 `native/src`；独立源码可以位于游戏项目之外。运行时 TS 自动同步到宿主 `assets/__plugin_dev/<name>`，由 Creator 导入和打包。同步保留已有 `.meta` 和 UUID；目标文件被手动修改时报告冲突。
 
-C++ 直接参与宿主的 CMake 构建，无需先生成库再复制到项目。新增源文件需加入插件的 `CMakeLists.txt`。只修改 C++ 时执行增量编译；TS、启停和资源变化需要更新 Creator 构建资源。
+C++ 直接参与宿主的 CMake 构建。新增源文件需加入插件的 `CMakeLists.txt`。插件模板引入 `native/third_party/{include,lib,CMakeLists.txt}`，并在构建宿主时将已启用插件的 `native/third_party/bin`、`native/windows/bin` 及 `plugin-dev.json#runtimeFiles` 部署到宿主可执行文件目录。运行文件声明和内容纳入 `nativeFingerprint`；TS、启停和资源变化需要更新 Creator 构建资源。
 
-本机配置、文件指纹、日志及构建缓存保存在项目 `.plugin-dev` 中，独立于插件源码。原生缓存使用 `.plugin-dev/build/windows`，调试配置写入独立工作区，不覆盖项目的 `.vscode`。
+本机配置、文件指纹、日志及构建缓存保存在项目 `.plugin-dev` 中。原生缓存使用 `.plugin-dev/build/windows`，调试配置写入宿主的独立工作区。
+
+`Debug` 和 `RelWithDebInfo` 开启 V8 Inspector，`Release` 关闭 Inspector。`RelWithDebInfo` 设置 `USE_V8_DEBUGGER_FORCE=ON`，并为宿主 `Game.cpp` 设置启动 Inspector 所需的 `CC_DEBUG=1`；引擎保持当前构建配置。V8 导入库和部署 DLL 均通过 CMake imported target 选择对应配置。构建状态记录规范化后的 `buildType`，配置切换清除 `builtAt`，运行入口检查成功构建记录。
+
+## TypeScript 项目
+
+插件源码的 `tsconfig.json` 检查 `runtime/`，通过 `paths.cc` 使用 `.local/cc-default.d.ts` 基础声明。此文件为独立 external module，按源码目录维护。宿主声明以 ambient modules 加入各宿主项目。
+
+每个宿主在 `.plugin-dev/typescript/projects/<源码标识>/` 保存 `tsconfig.json` 和 `cc-host.d.ts`。生成配置扩展源码 tsconfig，文件直接指向原始 runtime。引擎声明优先于同名宿主声明，宿主独有的环境声明一并加入。源码目录 `.local` 与宿主 `.plugin-dev` 含有有效 Git 忽略规则；导出插件排除 `.local`。
+
+VS Code 从源文件所在目录向上查找 tsconfig。工作台的 TypeScript plugin 通过标准 `getExternalFiles` 给这个源码项目加入当前宿主声明。每个宿主的完整官方 TypeScript SDK 和 plugin 位于同一 `node_modules`，SDK 按标准模块规则加载 plugin。工作区使用窗口级 `typescript.tsdk`；用户在可信工作区选择 **Use Workspace Version** 后启用该 SDK。命令行检查直接使用各宿主生成的 tsconfig。
+
+## 运行资源归属与发布入口
+
+`.plugin-dev/runtime-binaries.json` 使用 `schemaVersion: 2`，保存 `projectPath` 和 `outputs`。`outputs` 按规范化的绝对输出目录索引，每项保存 `directory`、可执行文件名称，以及按相对目标路径记录的 `target`、`sha256`、`owners`、`managed`。
+
+只有部署模块在目标不存在时创建的文件使用 `managed: true`。宿主已有的同内容文件记录为 `managed: false`。同内容资源可以被多个插件引用，清理要求文件受管、最后一个引用已解除且当前内容匹配记录。所有输出目录分别检查归属；切换输出目录后，其他仍有引用的目录保留对应构建内容。
+
+旧格式中无法确认归属的记录保存在 `legacyUnowned`，其中的文件按非受管文件处理。内容冲突、手工修改、绝对目标路径、目录越界、符号链接和 Windows 文件名别名均终止部署。
+
+发布包的 `contributions.builder` 指向 `editor/builder.js`，由 Windows hooks 在 `onBeforeBuild` 同步 TS，在资源构建和原生编译前维护宿主 Post hook，并在 `onAfterMake` 核对运行资源。支持文件保存在宿主 `.plugin-dev/native-build`，`native/engine/{win64,windows}/Post-PluginDevWindows.cmake` 通过相对路径加载公共支持，文件归属记录位于 `.plugin-dev/windows-build-hooks.json`。Post hook 加入所在目录的 Git 忽略规则，由构建入口按宿主重新生成。
+
+`runtime-build.cmake` 在 Creator 完成依赖复制后，为可执行目标注册 `POST_BUILD`，并建立 `cpd_runtime_deploy` 默认构建目标。CMake 通过 `file(GENERATE)` 写入实际配置和可执行文件路径，供构建 hooks 使用。最后一个插件禁用或解除引用后，宿主公共支持继续执行资源清理。
 
 ## 引擎与工具链
 
@@ -96,4 +122,10 @@ C++ 和游戏 TS 使用两套调试会话，分别连接原生调试器和 V8 In
 
 渲染插件应在管线创建后获取当前管线，按管线实例管理注册状态。输入输出尺寸或设备状态变化时，需要重建相应资源。空回调不能作为输出纹理的生产者。
 
-模板不包含神经网络模型、推理后端或 GPU 图像处理。接入推理库时，需要明确模型生命周期、张量与纹理格式、设备和队列同步、历史帧资源及失败回退。RenderGraph 的依赖声明不会自动处理外部推理库内部的同步。
+接入推理库时，需要明确模型生命周期、张量与纹理格式、设备和队列同步、历史帧资源及错误处理。RenderGraph 的依赖声明需要与外部推理库的同步规则共同满足。
+
+## 发布验收
+
+发布验证使用导出的最终插件包，在全新 Creator 项目中完成安装、资源构建、三种原生构建和真实场景启动，并核对 TS → JSB → C++ 的结果、进程加载的 DLL、PDB 与构建配置。资源部署验证覆盖共享依赖、升级、禁用、解除引用、多输出目录和用户修改保护。
+
+插件 API 应规定对象所有权、线程要求、资源释放和错误行为；渲染与推理插件还应验证图像结果、模型加载、GPU 同步、尺寸变化及资源重建。`engine-version` 范围依据逐版本安装和运行结果设置，CI 保存相应工具链、依赖版本及验收记录。
