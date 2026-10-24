@@ -37,7 +37,7 @@ test('CMake 参数与调试工作区使用相同的 Inspector 配置', t => {
     const project = directory(t);
     const base = { nativeSourceDir: project, buildDir: path.join(project, 'build'), resourceDir: project, enginePath: project, tools: { ninja: 'ninja', node: process.execPath } };
     for (const buildType of ['Debug', 'RelWithDebInfo', 'Release']) {
-        const state = { ...base, buildType };
+        const state = { ...base, buildType, configuredAt: 'now', builtAt: 'now', executable: path.join(project, 'Game.exe'), runningPid: 1234 };
         const enabled = buildType !== 'Release';
         const args = internal.cmakeArguments(state, 'cl.exe');
         assert.ok(args.includes(`-DUSE_V8_DEBUGGER:BOOL=${enabled ? 'ON' : 'OFF'}`));

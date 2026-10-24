@@ -19,7 +19,8 @@ function editorHarness(t, windows = {}, core = {}, editor = {}, electron = {}) {
     vm.runInNewContext(fs.readFileSync(path.join(root, 'main.js'), 'utf8'), {
         exports, __dirname: root, process, console, AbortController,
         require: (id) => id === './lib/core.cjs' ? { listPlugins: () => [], ...core }
-            : id === './lib/windows.cjs' ? windows : id === 'electron' ? electron : require(id),
+            : id === './lib/windows.cjs' ? windows : id === './lib/ide.cjs' ? require('../lib/ide.cjs')
+                : id === 'electron' ? electron : require(id),
         Editor: {
             Project: { path: project }, Panel: { open: async () => true },
             Package: { getPackages: () => [], register: () => {}, enable: () => {}, disable: () => {}, unregister: () => {} },
@@ -242,6 +243,27 @@ test('in-editor prepare waits for official BUILD_SUCCESS and never starts a seco
     assert.equal(build[2].nextStages.length, 0);
 });
 
+test('IDE preference reaches workspace generation and opens its actual solution path', async t => {
+    let input;
+    let opened;
+    let solutionPath;
+    const { methods } = editorHarness(t, {
+        debugWorkspace: async options => {
+            input = options;
+            solutionPath = path.join(options.projectPath, 'Game.slnx');
+            fs.writeFileSync(solutionPath, '<Solution/>');
+            return { ide: 'visual-studio', workspacePath: solutionPath };
+        },
+    }, {}, {}, { shell: { openPath: async value => { opened = value; return ''; } } });
+    methods.saveSettings({ ide: 'visual-studio' });
+    const task = methods.startTask('debug');
+    await nextTurn();
+    assert.equal(methods.getTask(task.id).status, 'succeeded');
+    assert.equal(input.ide, 'visual-studio');
+    assert.equal(opened, solutionPath);
+    assert.throws(() => methods.saveSettings({ ide: 'unknown' }), /Unsupported IDE/);
+});
+
 test('in-editor engine mismatch is blocked before any builder call', async (t) => {
     let builderCalls = 0;
     const { methods, project } = editorHarness(t, {
@@ -255,8 +277,51 @@ test('in-editor engine mismatch is blocked before any builder call', async (t) =
     await nextTurn();
     assert.equal(methods.getTask(task.id).status, 'failed');
     assert.match(methods.getTask(task.id).error, /引擎与工作台设置不一致/);
-    assert.match(methods.getTask(task.id).error, /保存并关闭当前项目/);
+    assert.doesNotMatch(methods.getTask(task.id).error, /保存并关闭当前项目/);
     assert.equal(builderCalls, 0);
+});
+
+test('automatic test scene is imported before building and builder failure preserves its detail', async (t) => {
+    let enginePath;
+    let taskName;
+    const calls = [];
+    const scene = { uuid: 'test-scene-uuid', url: 'db://assets/__plugin_dev_host/plugin-dev.scene' };
+    const { methods, project } = editorHarness(t, {
+        build: async options => options.prepareAssets({ projectPath: options.projectPath,
+            enginePath: options.enginePath, devHost: { assetUrl: 'db://assets/__plugin_dev_host', scene },
+            buildConfig: { platform: 'windows', scenes: [scene], startScene: scene.uuid } }),
+    }, {}, { Message: { request: async (pkg, message, ...args) => {
+        calls.push([pkg, message, ...args]);
+        if (message === 'query-info') return { path: enginePath, nativePath: path.join(enginePath, 'native') };
+        if (message === 'query-worker-ready') return true;
+        if (message === 'refresh-asset') return;
+        if (message === 'query-asset-info') return scene;
+        if (message === 'add-task') {
+            assert.equal(args[0].startScene, scene.uuid);
+            assert.deepEqual(args[0].scenes, [scene]);
+            taskName = args[0].taskName;
+            return 34;
+        }
+        if (message === 'query-tasks-info') return { list: [
+            { options: { taskName: 'unrelated' }, message: 'wrong error' },
+            { options: { taskName }, message: 'Asset compilation failed', detailMessage: 'Bootstrap.ts: invalid import' },
+        ] };
+        throw new Error(`Unexpected message ${message}`);
+    } } });
+    enginePath = path.join(project, 'engine');
+    fs.mkdirSync(path.join(enginePath, 'native'), { recursive: true });
+    fs.writeFileSync(path.join(enginePath, 'native/CMakeLists.txt'), '');
+    methods.saveSettings({ enginePath });
+    const started = methods.startTask('build-run');
+    await nextTurn();
+    const result = methods.getTask(started.id);
+    assert.equal(result.status, 'failed');
+    assert.match(result.error, /Bootstrap\.ts: invalid import/);
+    assert.doesNotMatch(result.error, /wrong error|保存并关闭|命令行回退/);
+    const relevant = calls.filter(call => ['refresh-asset', 'query-asset-info', 'add-task'].includes(call[1]));
+    assert.deepEqual(relevant.map(call => call[1]), ['refresh-asset', 'refresh-asset', 'query-asset-info', 'add-task']);
+    assert.equal(relevant[0][2], 'db://assets/__plugin_dev');
+    assert.equal(relevant[1][2], 'db://assets/__plugin_dev_host');
 });
 
 test('cancelling the editor asset stage waits for it before unlocking and blocks native work', async (t) => {

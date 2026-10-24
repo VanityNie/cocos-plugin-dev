@@ -6,7 +6,7 @@ const PACKAGE_NAME = 'cocos-plugin-dev';
 const labels = {
     create: '创建插件', link: '添加开发引用', unlink: '解除开发引用', enable: '更新插件状态', sync: '同步运行时文件', package: '打包插件',
     doctor: '检查环境', prepare: '准备 Windows 宿主', configure: '配置原生构建',
-    build: '编译 Windows 宿主', run: '启动游戏', 'build-run': '构建并运行', debug: '生成调试工作区',
+    build: '编译 Windows 宿主', run: '启动游戏', 'build-run': '构建并运行', debug: '打开开发工作区',
     stop: '停止游戏', restart: '重启游戏',
 };
 
@@ -35,6 +35,7 @@ function settings(panel) {
         creatorPath: query(panel, '#creator-path').value,
         outputDir: query(panel, '#output-dir').value,
         buildType: query(panel, '#build-type').value,
+        ide: query(panel, '#ide').value,
     };
 }
 function switchCreateTab(panel, tabName) {
@@ -222,6 +223,7 @@ function applyContext(panel, context, restoreTask) {
         query(panel, '#creator-path').value = context.settings.creatorPath || '';
         query(panel, '#output-dir').value = context.settings.outputDir || '';
         query(panel, '#build-type').value = context.settings.buildType || 'Debug';
+        query(panel, '#ide').value = context.settings.ide || 'vscode';
         query(panel, '#settings-details').open = !context.settings.enginePath;
         const hostDetails = query(panel, '#host-details');
         if (hostDetails) hostDetails.open = !context.isEditorHost;

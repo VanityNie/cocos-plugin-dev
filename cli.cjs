@@ -25,7 +25,7 @@ node cli.cjs <command> --project <Creator project> [options]
   run         Run the built Windows game
   stop        Stop the game started by this workbench
   restart     Restart the built game without rebuilding
-  debug       Generate a separate VS Code workspace for native/JS debugging
+  debug       Generate a VS Code workspace or a Visual Studio solution (--ide)
   sandbox     Create an independent project from the installed Creator 3D template
 
 Options:
@@ -34,6 +34,7 @@ Options:
   --creator-path <CocosCreator.exe>  Select Creator
   --engine-path <engine root>       Select native engine (must match built JS assets)
   --compiler msvc|clang-cl          Windows compiler
+  --ide vscode|visual-studio        IDE project format for debug (default: vscode)
   --build-type Debug|RelWithDebInfo|Release  构建配置；package --binary 缺省使用最近成功构建的配置
   --binary                         导出已构建的 Windows 原生静态库，仅用于 package
   --display-name <label>            Plugin display name
@@ -51,7 +52,7 @@ function parseArgs(argv) {
         project: 'projectPath', name: 'name', template: 'template',
         'display-name': 'displayName', 'output-dir': 'outputDir',
         'creator-path': 'creatorPath', 'engine-path': 'enginePath',
-        compiler: 'compiler', 'build-type': 'buildType', 'native-source-dir': 'nativeSourceDir',
+        compiler: 'compiler', ide: 'ide', 'build-type': 'buildType', 'native-source-dir': 'nativeSourceDir',
         'resource-dir': 'resourceDir',
         'plugin-path': 'pluginPath', 'source-path': 'sourcePath',
     };
@@ -75,6 +76,10 @@ function parseArgs(argv) {
     }
     if (command === 'package' && options.buildType !== undefined && options.binary !== true) {
         throw new Error('package 使用 --build-type 时必须同时指定 --binary。');
+    }
+    if (options.ide !== undefined) {
+        if (command !== 'debug') throw new Error('--ide is only available for debug.');
+        options.ide = require('./lib/ide.cjs').normalizeIDE(options.ide);
     }
     return { command, options };
 }
@@ -102,7 +107,7 @@ function createSandbox(options) {
         creatorPath: path.join(creatorDir, 'CocosCreator.exe'),
         enginePath: options.enginePath || path.join(creatorDir, 'resources', 'resources', '3d', 'engine'),
     }, null, 2) + '\n');
-    return { projectPath: target, templatePath, message: 'Independent sandbox created. Install the tools, create a plugin, then prepare the Windows host.' };
+    return { projectPath: target, templatePath, message: 'Independent sandbox created. Install the tools, create a plugin, then use Build & Run to prepare and build automatically.' };
 }
 
 function checkCancelled(signal) {

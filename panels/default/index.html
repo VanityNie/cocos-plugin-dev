@@ -129,11 +129,13 @@
 
     <div class="section-body debug-body">
       <div class="workflow-bar">
-        <button type="button" data-action="prepare" data-mutation title="首次接入或新增原生插件后，生成 Windows 原生工程">① 首次准备宿主</button>
+        <select id="ide" data-mutation aria-label="开发环境">
+          <option value="vscode">VS Code · CMake / clangd</option>
+          <option value="visual-studio">Visual Studio · 解决方案</option>
+        </select>
+        <button type="button" data-action="debug" data-mutation title="立即打开插件源码与宿主类型环境，无需先构建游戏">打开开发工作区</button>
         <span class="flow-arrow" aria-hidden="true">➔</span>
-        <button type="button" data-action="build-run" class="primary" data-mutation title="增量编译并直接启动 Windows 游戏">② 构建并运行</button>
-        <span class="flow-arrow" aria-hidden="true">➔</span>
-        <button type="button" data-action="debug" data-mutation title="生成并打开 VS Code 调试工作区（支持 C++ 与 TS 断点）">③ 打开调试工作区</button>
+        <button type="button" data-action="build-run" class="primary" data-mutation title="自动生成测试场景、准备宿主、编译并运行插件">构建并运行</button>
         <button type="button" data-action="stop" class="ml-auto" data-mutation title="停止当前运行中的游戏进程">停止游戏</button>
       </div>
 
@@ -144,6 +146,7 @@
             <span class="prop-label">更多操作</span>
             <div class="toolbar">
               <button type="button" data-action="build" data-mutation>仅构建</button>
+              <button type="button" data-action="prepare" data-mutation>重新准备宿主资源</button>
               <button type="button" data-action="run" data-mutation>运行现有构建</button>
               <button type="button" data-action="restart" data-mutation>重启游戏</button>
               <button type="button" data-action="configure" data-mutation>重新配置</button>

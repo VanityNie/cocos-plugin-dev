@@ -82,6 +82,26 @@ test('native subprocess preserves special characters in arguments and reports er
     await assert.rejects(internal.execute(process.execPath, ['-e', 'console.error("useful reason");process.exit(2)']), /useful reason/);
 });
 
+test('compiler log decoder handles UTF-8 and localized linker lines split across chunks', () => {
+    let output = '';
+    const decoder = internal.outputDecoder('gbk', text => { output += text; });
+    const bytes = Buffer.concat([
+        Buffer.from('构建 [1/2]\n', 'utf8'),
+        Buffer.from([0xce, 0xde, 0xb7, 0xa8]), // 无法 (CP936)
+        Buffer.from(' LNK2019\r\n'),
+        Buffer.from('完成', 'utf8'),
+    ]);
+    for (const byte of bytes) decoder.write(Buffer.from([byte]));
+    decoder.end();
+    assert.equal(output, '构建 [1/2]\n无法 LNK2019\r\n完成');
+    let environment = '';
+    const unicode = internal.outputDecoder(undefined, text => { environment += text; }, 'utf-16le');
+    const bytes16 = Buffer.from('Path=C:\\开发工具\r\n', 'utf16le');
+    for (const byte of bytes16) unicode.write(Buffer.from([byte]));
+    unicode.end();
+    assert.equal(environment, 'Path=C:\\开发工具\r\n');
+});
+
 test('CMake File API discovers the game target rather than unrelated nested test tools', (t) => {
     const { root, file } = fixture(t);
     const prefix = 'build/.cmake/api/v1/reply/';
@@ -94,10 +114,11 @@ test('CMake File API discovers the game target rather than unrelated nested test
 
 test('workspace uses actual executable, a process task, native debugger and separate inspector', (t) => {
     const { root } = fixture(t);
-    const state = { enginePath: path.join(root, 'engine'), executable: path.join(root, 'build/MyGame.exe'), buildDir: path.join(root, 'build'), creatorPath: path.join(root, 'Creator.exe'), tools: { clangd: path.join(root, 'clangd.exe') } };
+    const state = { configuredAt: 'now', builtAt: 'now', enginePath: path.join(root, 'engine'), executable: path.join(root, 'build/MyGame.exe'), buildDir: path.join(root, 'build'), creatorPath: path.join(root, 'Creator.exe'), tools: { clangd: path.join(root, 'clangd.exe') } };
     const ws = internal.workspaceData(state, root, 'cli.cjs', process.execPath, 6086);
     assert.equal(ws.launch.configurations[0].program, state.executable);
     assert.equal(ws.launch.configurations[0].type, 'cppvsdbg');
+    assert.equal(ws.launch.configurations[0].preLaunchTask, undefined);
     assert.equal(ws.launch.configurations[1].port, 6086);
     assert.equal(ws.tasks.tasks[0].type, 'process');
     assert.ok(ws.tasks.tasks[0].args.includes('--project'));
@@ -113,7 +134,7 @@ test('two host workspaces use shared original source and separate compile databa
     for (const name of ['host-a', 'host-b']) {
         const project = path.join(root, name);
         const buildDir = path.join(project, '.plugin-dev/build/windows');
-        const ws = internal.workspaceData({ buildDir }, project, 'cli.cjs', process.execPath, 6086, plugins);
+        const ws = internal.workspaceData({ buildDir, configuredAt: 'now', builtAt: 'now', executable: path.join(buildDir, 'Game.exe') }, project, 'cli.cjs', process.execPath, 6086, plugins);
         assert.equal(ws.folders.find(folder => folder.name === 'Plugin: shared-plugin').path, source);
         assert.equal(ws.settings['clangd.arguments'][0], `--compile-commands-dir=${buildDir.replace(/\\/g, '/')}`);
         const mirror = path.join(project, 'assets/__plugin_dev/shared-plugin/index.ts').replace(/\\/g, '/');
@@ -122,6 +143,41 @@ test('two host workspaces use shared original source and separate compile databa
         assert.equal(Object.keys(mapping).some(key => key.endsWith('/plugin-enabled.ts')), false);
     }
     assert.equal(fs.readFileSync(path.join(source, '.clangd'), 'utf8'), 'User configuration');
+});
+
+test('running host debugging attaches both languages without launching a second game', t => {
+    const { root } = fixture(t);
+    const state = { configuredAt: 'now', builtAt: 'now', executable: path.join(root, 'Game.exe'), runningPid: 12345 };
+    const ws = internal.workspaceData(state, root, 'cli.cjs', null, 6087);
+    assert.equal(ws.launch.configurations[0].request, 'attach');
+    assert.equal(ws.launch.configurations[0].processId, '12345');
+    assert.equal(ws.launch.configurations.find(item => item.type === 'pwa-node').port, 6087);
+    assert.ok(ws.launch.compounds[0].configurations.every(name => name.includes('attach')));
+    assert.equal(ws.tasks.tasks.length, 0);
+    assert.ok(ws.launch.configurations.every(item => !item.preLaunchTask));
+    assert.ok(ws.launch.configurations.every(item => item.request === 'attach'));
+});
+
+test('starting a host refreshes an existing workspace to attach to that same process', async t => {
+    const { root, file } = fixture(t);
+    const executable = file('build/Game.exe', 'test fixture; never executed');
+    file('.plugin-dev/windows.json', { configuredAt: 'now', builtAt: 'now', executable,
+        buildType: 'Debug', tools: { node: process.execPath } });
+    const originalStart = processes.startUnlocked;
+    const originalRecorded = processes.recorded;
+    let started = false;
+    const logPath = file('.plugin-dev/logs/game.log', 'Debugger listening on ws://127.0.0.1:6089/test\n');
+    processes.startUnlocked = async () => { started = true; return { pid: 12345, logPath }; };
+    processes.recorded = async () => started ? { identity: { pid: 12345 }, logPath } : null;
+    t.after(() => { processes.startUnlocked = originalStart; processes.recorded = originalRecorded; });
+    await windows.debugWorkspace({ projectPath: root });
+    const workspacePath = path.join(root, '.plugin-dev/plugin-dev.code-workspace');
+    assert.equal(JSON.parse(fs.readFileSync(workspacePath)).launch.configurations[0].request, 'launch');
+    await windows.run({ projectPath: root });
+    const workspace = JSON.parse(fs.readFileSync(workspacePath));
+    assert.equal(workspace.launch.configurations[0].processId, '12345');
+    assert.ok(workspace.launch.configurations.every(item => item.request === 'attach'));
+    assert.equal(workspace.launch.configurations.find(item => item.type === 'pwa-node').port, 6089);
 });
 
 test('detaching a plugin prevents running the old executable until assets and native build finish', async t => {
@@ -143,7 +199,7 @@ test('debug workspace never changes the project .vscode or native compile databa
     const { root, file } = fixture(t);
     file('.vscode/launch.json', 'user debugging');
     file('native/compile_commands.json', 'android database');
-    file('.plugin-dev/windows.json', { configuredAt: 'now', executable: path.join(root, 'build/MyGame.exe'), buildDir: path.join(root, 'build'), tools: { node: process.execPath } });
+    file('.plugin-dev/windows.json', { configuredAt: 'now', builtAt: 'now', executable: file('build/MyGame.exe', 'fixture'), buildDir: path.join(root, 'build'), tools: { node: process.execPath } });
     const result = await windows.debugWorkspace({ projectPath: root });
     assert.equal(result.workspacePath, path.join(root, '.plugin-dev/plugin-dev.code-workspace'));
     assert.equal(fs.readFileSync(path.join(root, '.vscode/launch.json'), 'utf8'), 'user debugging');
@@ -151,10 +207,16 @@ test('debug workspace never changes the project .vscode or native compile databa
     assert.ok(result.warnings.some((warning) => warning.includes('source maps')));
 });
 
-test('run and debugger do not guess an executable before a successful build/configure', async (t) => {
+test('unbuilt hosts open a development workspace without guessed executables', async (t) => {
     const { root } = fixture(t);
     await assert.rejects(windows.run({ projectPath: root }), /Build the Windows host/);
-    await assert.rejects(windows.debugWorkspace({ projectPath: root }), /Configure the Windows host/);
+    const result = await windows.debugWorkspace({ projectPath: root });
+    assert.equal(result.nativeReady, false);
+    const workspace = JSON.parse(fs.readFileSync(result.workspacePath, 'utf8'));
+    assert.deepEqual(workspace.launch.configurations, []);
+    assert.deepEqual(workspace.launch.compounds, []);
+    assert.ok(result.warnings.some(text => text.includes('自动准备')));
+    assert.equal(fs.existsSync(path.join(root, '.plugin-dev/windows.json')), false);
 });
 
 test('build acknowledgements preserve edits made while the compiler was running', (t) => {

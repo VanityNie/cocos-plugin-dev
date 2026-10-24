@@ -245,16 +245,32 @@ test('independent editor/CLI processes serialize state updates without dropping 
 test('tool install supports owned upgrades and refuses unrelated or edited files', t => {
     const { projectPath, project, root } = fixture(t);
     const source = path.join(root, 'tool-source');
-    put(path.join(source, 'package.json'), JSON.stringify({ name: 'cocos-plugin-dev', version: '0.1.0' }));
+    put(path.join(source, 'package.json'), JSON.stringify({ name: 'cocos-plugin-dev', version: '0.1.0',
+        scripts: { test: 'node run-tests.cjs', plugin: 'node cli.cjs' }, devDependencies: { jsdom: '26.1.0' } }));
     put(path.join(source, 'main.js'), 'module.exports = {};');
     put(path.join(source, 'node_modules/typescript/package.json'), JSON.stringify({ name: 'typescript', version: '5.9.3' }));
     put(path.join(source, 'node_modules/typescript/index.js'), 'module.exports = {};');
     put(path.join(source, '.local/private.txt'), 'do not ship');
+    put(path.join(source, 'tests/fixtures/example/native/cc_plugin.json'), '{"modules":[{"target":"fixture"}]}');
+    put(path.join(source, 'run-tests.cjs'), 'test runner');
+    put(path.join(source, 'sandbox/package.json'), '{"name":"game"}');
     const installed = core.installTools({ projectPath, sourcePath: source });
     assert.equal(fs.existsSync(path.join(installed.path, '.local')), false);
+    for (const entry of ['tests', 'run-tests.cjs', 'sandbox']) assert.equal(fs.existsSync(path.join(installed.path, entry)), false);
+    const installedPackage = readJson(path.join(installed.path, 'package.json'));
+    assert.equal(installedPackage.devDependencies, undefined);
+    assert.deepEqual(installedPackage.scripts, { plugin: 'node cli.cjs' });
+    // Upgrade an older owned installation that shipped an enabled test fixture.
+    const obsolete = 'tests/fixtures/example/native/cc_plugin.json';
+    put(path.join(installed.path, obsolete), fs.readFileSync(path.join(source, obsolete)));
+    const marker = path.join(installed.path, '.cocos-plugin-dev-install.json');
+    const ownership = readJson(marker);
+    ownership.files[obsolete] = require('node:crypto').createHash('sha256').update(fs.readFileSync(path.join(installed.path, obsolete))).digest('hex');
+    put(marker, JSON.stringify(ownership));
     put(path.join(source, 'main.js'), 'module.exports = { upgraded: true };');
     core.installTools({ projectPath, sourcePath: source });
     assert.match(fs.readFileSync(path.join(installed.path, 'main.js'), 'utf8'), /upgraded/);
+    assert.equal(fs.existsSync(path.join(installed.path, obsolete)), false);
     put(path.join(installed.path, 'main.js'), 'user customized');
     assert.throws(() => core.installTools({ projectPath, sourcePath: source }), /手工修改/);
     const other = project('unrelated');

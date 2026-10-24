@@ -1,6 +1,6 @@
 {
   "name": "cocos-plugin-dev",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "license": "MIT",
   "repository": {
@@ -17,29 +17,83 @@
     "test": "node run-tests.cjs",
     "plugin": "node cli.cjs"
   },
-  "engines": { "node": ">=18" },
-  "dependencies": { "typescript": "5.9.3", "yazl": "3.3.1" },
-  "devDependencies": { "jsdom": "26.1.0" },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "typescript": "5.9.3",
+    "yazl": "3.3.1"
+  },
+  "devDependencies": {
+    "jsdom": "26.1.0"
+  },
   "panels": {
     "default": {
       "title": "插件开发 · Windows",
       "type": "dockable",
       "main": "./panels/default",
-      "size": { "min-width": 360, "min-height": 420, "width": 680, "height": 760 }
+      "size": {
+        "min-width": 360,
+        "min-height": 420,
+        "width": 680,
+        "height": 760
+      }
     }
   },
   "contributions": {
-    "menu": [{ "path": "i18n:menu.develop", "label": "插件开发", "message": "open-panel" }],
+    "menu": [
+      {
+        "path": "i18n:menu.develop",
+        "label": "插件开发",
+        "message": "open-panel"
+      }
+    ],
     "messages": {
-      "open-panel": { "methods": ["openPanel"] },
-      "get-context": { "methods": ["getContext"] },
-      "select-host": { "methods": ["selectHost"] },
-      "choose-directory": { "methods": ["chooseDirectory"] },
-      "save-settings": { "methods": ["saveSettings"] },
-      "start-task": { "methods": ["startTask"] },
-      "get-task": { "methods": ["getTask"] },
-      "cancel-task": { "methods": ["cancelTask"] },
-      "open-source": { "methods": ["openSource"] }
+      "open-panel": {
+        "methods": [
+          "openPanel"
+        ]
+      },
+      "get-context": {
+        "methods": [
+          "getContext"
+        ]
+      },
+      "select-host": {
+        "methods": [
+          "selectHost"
+        ]
+      },
+      "choose-directory": {
+        "methods": [
+          "chooseDirectory"
+        ]
+      },
+      "save-settings": {
+        "methods": [
+          "saveSettings"
+        ]
+      },
+      "start-task": {
+        "methods": [
+          "startTask"
+        ]
+      },
+      "get-task": {
+        "methods": [
+          "getTask"
+        ]
+      },
+      "cancel-task": {
+        "methods": [
+          "cancelTask"
+        ]
+      },
+      "open-source": {
+        "methods": [
+          "openSource"
+        ]
+      }
     }
   }
 }

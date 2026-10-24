@@ -11,7 +11,7 @@ Built on the official Cocos native plugin mechanism. A single plugin source tree
 - Windows x64, Cocos Creator 3.8.8 (Cocos 4.0 experimental support)
 - Node.js 18+
 - Visual Studio C++ Desktop Development workload, Windows SDK, CMake, Ninja
-- Optional: VS Code, C/C++ debugging extension, clangd
+- Optional: VS Code (CMake Tools, C/C++ debugger, clangd), or the Visual Studio IDE
 
 The JS engine used by Creator and the C++ engine used for native builds must match. When using a custom engine, configure both in Creator Preferences and restart the editor.
 
@@ -28,17 +28,17 @@ Scan and enable `cocos-plugin-dev` in Creator's **Extension Manager**, then open
 
 ## Workflow
 
-1. Select a game host and verify Creator, engine, and toolchain paths.
+1. Select a game host. The workbench detects the active Creator engine and installed toolchain.
 2. Enter a plugin name, choose a template (`native` or `render`) and source directory to create a plugin, or link an existing plugin repository.
 3. Edit `runtime/` (TS) and `native/src/` (C++) inside the plugin source directory.
-4. Click **Prepare Host** to generate game assets and the Windows native CMake project.
-5. Click **Build & Run** to verify; open the generated VS Code workspace for breakpoint debugging.
+4. Click **Build & Run**. The workbench generates a development scene, prepares TS assets and the native host, compiles, and starts the game. Saving the current scene or attaching a probe manually is unnecessary.
+5. Choose **VS Code · CMake / clangd** or **Visual Studio · Solution**, then open the development workspace. VS Code can open before the first build; Visual Studio automatically prepares the host and generates its solution without compiling it first.
 6. Click **Package** to export a standalone installable plugin directory and ZIP archive.
 
 ### Host & Source Management
 
 - **Standalone Source & Host Adapter**: `plugin-dev.host.json` in the host project root records relative paths to linked plugin sources and their enable states (commit this file to game version control). `extensions/<name>` inside the host is a generated adapter directory—always edit the standalone source repository rather than the adapter.
-- **Runtime TS Synchronization**: `runtime/` is automatically mirrored into `assets/__plugin_dev/<name>` while preserving existing `.meta` UUIDs. Mount the generated `PluginProbe.ts` component onto a scene node to test TS → C++ calls.
+- **Runtime TS Synchronization**: `runtime/` is automatically mirrored into `assets/__plugin_dev/<name>` while preserving existing `.meta` UUIDs. A dedicated scene in `assets/__plugin_dev_host/` checks native registration and attaches each enabled plugin's `PluginProbe.ts`. Plugins without a probe receive registration checks only; add a probe to test their business behavior.
 - **Enable / Disable & Unlink**:
   - **Disable**: Updates both the TS runtime flag and `cc_plugin.json` `disabled` field; takes effect after rebuilding and restarting the game.
   - **Unlink**: Removes the host adapter directory and reference from the selected host while keeping the standalone source repository and imported asset UUIDs intact.
@@ -52,12 +52,12 @@ node cli.cjs create --plugin-path E:/plugins/my-plugin --name my-plugin --templa
 node cli.cjs link --project E:/games/MyGame --source-path E:/plugins/my-plugin
 node cli.cjs link --project E:/games/TestGame --source-path E:/plugins/my-plugin
 node cli.cjs doctor --project E:/games/MyGame
-node cli.cjs prepare --project E:/games/MyGame
 node cli.cjs build --project E:/games/MyGame --refresh-assets
 node cli.cjs run --project E:/games/MyGame
 node cli.cjs stop --project E:/games/MyGame
 node cli.cjs restart --project E:/games/MyGame
-node cli.cjs debug --project E:/games/MyGame
+node cli.cjs debug --project E:/games/MyGame --ide vscode
+node cli.cjs debug --project E:/games/MyGame --ide visual-studio
 node cli.cjs package --project E:/games/MyGame --name my-plugin --output-dir E:/exports
 node cli.cjs unlink --project E:/games/TestGame --name my-plugin
 ```
@@ -102,10 +102,24 @@ Example `runtimeFiles` declaration in `plugin-dev.json`:
 
 ### Breakpoint Debugging & TypeScript Declarations
 
-Run `debug` (or click the panel action) and open `.plugin-dev/plugin-dev.code-workspace`:
-- **C++ IntelliSense & Debugging**: Configures `compile_commands.json` for clangd and provides native debugger launch targets. Rebuild and restart the game after modifying C++ sources.
+Choose an IDE in the panel, or run `debug --ide vscode|visual-studio`:
+
+| IDE | Generated project | Build cache |
+| --- | --- | --- |
+| VS Code | `.plugin-dev/plugin-dev.code-workspace`, CMake Tools, clangd, native and TS debugger configurations | `.plugin-dev/build/windows` (Ninja) |
+| Visual Studio | `.sln` / `.slnx` under `.plugin-dev/build/visual-studio/`, including host, engine, and native plugin targets | `.plugin-dev/build/visual-studio` (Visual Studio) |
+
+Both projects reference the original plugin sources and use separate CMake caches. The Visual Studio solution uses the selected build configuration; regenerate after switching Debug / RelWithDebInfo / Release so assets, Inspector settings, and native dependencies stay consistent. The workbench selects a CMake that supports the installed Visual Studio version, preferring that installation's bundled CMake over an older Creator copy.
+
+Visual Studio 2022 generates `.sln`; Visual Studio 2026 generates `.slnx`. Both open directly in their corresponding IDE. The format follows the [official CMake generator](https://github.com/Kitware/CMake/commit/e6aa7742b0cc611377cfb4d54415bc4862fc5e1f), without a custom conversion step.
+
+- **VS Code CMake & clangd**: CMake Tools uses the workbench's source directory, Ninja cache, compiler environment, and configure arguments. clangd reads `.plugin-dev/build/windows/compile_commands.json` after CMake configuration. Before configuration, source editing and TS declarations remain available. Automatic configuration is disabled; use **Build & Run** for asset synchronization and the complete build, or CMake Tools for native targets in an already prepared host.
+- **Visual Studio C++ Debugging**: The solution selects the game executable as its startup project and its output directory as the debugging working directory. Build and launch inside Visual Studio, or attach to the game started by the workbench. After TS or asset changes, rebuild resources in the workbench and regenerate the solution.
+- **Workbench C++ Debugging**: When the game is running, VS Code receives an attach configuration for its PID. The launch configuration starts the existing executable. Rebuild and restart after C++ changes.
 - **TypeScript Debugging**: Launch the game instance first, then attach the V8 Inspector (default port `6086`). Source maps point directly to the standalone `runtime/` directory.
 - **Host-Isolated TypeScript Declarations**: Each host generates an isolated TypeScript project and local TypeScript SDK under `.plugin-dev/typescript/`. When opening the workspace in VS Code, run **TypeScript: Select TypeScript Version → Use Workspace Version** to load the active host's and engine's `cc` declarations for the shared plugin source.
+
+The Visual Studio solution handles native C++ development; TS breakpoints use VS Code's V8 Inspector attachment. Binary packaging uses the workbench's successful Ninja build record; compiling in Visual Studio does not replace that record.
 
 Override default tool paths via environment variables: `COCOS_CREATOR_PATH`, `COCOS_PLUGIN_NODE`, `COCOS_PLUGIN_CMAKE`, `COCOS_PLUGIN_NINJA`, `COCOS_PLUGIN_CLANGD`, `COCOS_PLUGIN_CLANG_CL`, `VSWHERE_PATH`. If an interrupted build leaves `PROJECT_LOCK_RECOVERY_REQUIRED`, verify no background build process is active and remove the reported lock directory.
 

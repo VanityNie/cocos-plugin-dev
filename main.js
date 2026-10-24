@@ -53,14 +53,15 @@ function readSettings(project) {
         }
     }
     const creator = /cocoscreator\.exe$/i.test(process.execPath) ? process.execPath : '';
-    return { enginePath: '', creatorPath: creator, outputDir: path.join(project, '.plugin-dev', 'packages'), buildType: 'Debug', ...saved };
+    return { enginePath: '', creatorPath: creator, outputDir: path.join(project, '.plugin-dev', 'packages'), buildType: 'Debug', ide: 'vscode', ...saved };
 }
 
 function cleanSettings(values) {
     const result = {};
-    for (const key of ['enginePath', 'creatorPath', 'outputDir', 'buildType']) {
+    for (const key of ['enginePath', 'creatorPath', 'outputDir', 'buildType', 'ide']) {
         if (typeof values[key] === 'string') result[key] = values[key].trim();
     }
+    if (result.ide) result.ide = require('./lib/ide.cjs').normalizeIDE(result.ide);
     return result;
 }
 
@@ -95,43 +96,57 @@ async function activeEngine() {
 async function prepareInEditor(task, options) {
     const quote = (value) => `'${String(value).replace(/'/g, "''")}'`;
     const fallback = `保存并关闭当前项目的 Creator 后，在 PowerShell 执行：\nnode ${quote(path.join(__dirname, 'cli.cjs'))} prepare --project ${quote(options.projectPath)} --engine-path ${quote(options.enginePath)}`;
-    try {
-        throwIfCancelled(task);
-        const engine = await activeEngine();
-        throwIfCancelled(task);
-        const expected = normalizedEngine(options.enginePath);
-        if (!expected || normalizedEngine(engine.path) !== expected || normalizedEngine(engine.nativePath) !== expected) {
-            throw new Error(`当前编辑器的引擎与工作台设置不一致。\nJS：${engine.path}\nC++：${engine.nativePath}\n目标：${options.enginePath}\n请在 Creator 偏好设置中选择相同的 JS 和原生引擎，并重启项目。`);
-        }
-        const ready = await Editor.Message.request('builder', 'query-worker-ready');
-        throwIfCancelled(task);
-        if (!ready) throw new Error('Creator 构建进程尚未就绪。请等项目加载完成后重试。');
-        append(task, '正在通过当前编辑器构建 Windows 资源；不会启动第二个 Creator。\n');
-        // add-task is a version-adapted, protected Creator API, not a stable public API.
-        // Its declaration is builtin/builder/@types/protected/message.d.ts. shouldWait
-        // returns BuildExitCode; 36 is BUILD_SUCCESS. Never equate queueing with success.
-        let result;
-        task.editorBuildPending = true;
-        try {
-            result = await Editor.Message.request('builder', 'add-task', {
-                ...options.buildConfig, taskName: 'Plugin Development Windows', nextStages: [],
-            }, true);
-        } finally {
-            task.editorBuildPending = false;
-        }
-        // Creator's running asset stage has no verified cancellation API. Wait
-        // for it to settle before rejecting; the native stage must not start.
-        if (result !== 36) {
-            const descriptions = { 32: '构建参数错误', 34: '资源构建失败', 37: '构建器正在处理其他任务', 50: '构建器未知错误' };
-            throw new Error(`Creator 构建未完成：${descriptions[result] || `返回值 ${JSON.stringify(result)}，接口可能已变化`}。请检查 Creator 构建日志。`);
-        }
-        throwIfCancelled(task);
-        append(task, '当前编辑器已完成资源构建（BUILD_SUCCESS=36）。\n');
-        return { enginePath: options.enginePath };
-    } catch (error) {
-        if (error.name === 'AbortError' || error.code === 'ABORT_ERR') throw error;
-        throw new Error(`${error.message}\n\n如果当前 Creator 版本不支持编辑器内构建接口，可使用命令行回退：\n${fallback}`);
+    throwIfCancelled(task);
+    const engine = await activeEngine();
+    throwIfCancelled(task);
+    const expected = normalizedEngine(options.enginePath);
+    if (!expected || normalizedEngine(engine.path) !== expected || normalizedEngine(engine.nativePath) !== expected) {
+        throw new Error(`当前编辑器的引擎与工作台设置不一致。\nJS：${engine.path}\nC++：${engine.nativePath}\n目标：${options.enginePath}\n请在 Creator 偏好设置中选择相同的 JS 和原生引擎，并重启项目。`);
     }
+    const ready = await Editor.Message.request('builder', 'query-worker-ready');
+    throwIfCancelled(task);
+    if (!ready) throw new Error('Creator 构建进程尚未就绪。请等项目加载完成后重试。');
+    if (options.devHost) {
+        append(task, '正在导入自动生成的插件测试入口。\n');
+        await Editor.Message.request('asset-db', 'refresh-asset', 'db://assets/__plugin_dev');
+        await Editor.Message.request('asset-db', 'refresh-asset', options.devHost.assetUrl);
+        const scene = await Editor.Message.request('asset-db', 'query-asset-info', options.devHost.scene.url);
+        if (!scene || scene.uuid !== options.devHost.scene.uuid) throw new Error(`插件测试场景尚未正确导入：${options.devHost.scene.url}`);
+        throwIfCancelled(task);
+    }
+    append(task, '正在通过当前编辑器构建 Windows 资源；不会启动第二个 Creator。\n');
+    // add-task is a version-adapted, protected Creator API, not a stable public API.
+    // Its declaration is builtin/builder/@types/protected/message.d.ts. shouldWait
+    // returns BuildExitCode; 36 is BUILD_SUCCESS. Never equate queueing with success.
+    let result;
+    const taskName = `Plugin Development Windows ${task.id}`;
+    task.editorBuildPending = true;
+    try {
+        result = await Editor.Message.request('builder', 'add-task', {
+            ...options.buildConfig, taskName, nextStages: [],
+        }, true);
+    } catch (error) {
+        throw new Error(`无法调用 Creator 编辑器构建接口：${error.message}\n${fallback}`);
+    } finally {
+        task.editorBuildPending = false;
+    }
+    // Creator's running asset stage has no verified cancellation API. Wait
+    // for it to settle before rejecting; the native stage must not start.
+    if (result !== 36) {
+        const descriptions = { 32: '构建参数错误', 34: '资源构建失败', 37: '构建器正在处理其他任务', 50: '构建器未知错误' };
+        let detail;
+        try {
+            const tasks = await Editor.Message.request('builder', 'query-tasks-info', { type: 'build' });
+            const failed = tasks.list.find(item => item.options.taskName === taskName);
+            detail = failed ? [failed.message, failed.detailMessage].filter(Boolean).join('\n') : '未返回本次构建的详细记录。';
+        } catch (error) {
+            detail = `读取构建详情失败：${error.message}`;
+        }
+        throw new Error(`Creator 构建未完成（${result}）：${descriptions[result] || '未知返回值'}。\n${detail}\n请查看 Creator 的“构建发布”和控制台中的本次任务。`);
+    }
+    throwIfCancelled(task);
+    append(task, '当前编辑器已完成资源构建（BUILD_SUCCESS=36）。\n');
+    return { enginePath: options.enginePath };
 }
 
 function append(task, value) {
@@ -210,7 +225,7 @@ async function openPath(file) {
 }
 
 const ACTIONS = new Set(['create', 'link', 'unlink', 'enable', 'sync', 'package', 'doctor', 'prepare', 'configure', 'build', 'run', 'stop', 'restart', 'build-run', 'debug']);
-const CANCELLABLE_ACTIONS = new Set(['prepare', 'configure', 'build', 'build-run']);
+const CANCELLABLE_ACTIONS = new Set(['prepare', 'configure', 'build', 'build-run', 'debug']);
 
 function requestCancellation(task) {
     if (task.status === 'cancelling') return;
@@ -234,6 +249,7 @@ async function execute(task, input, settings) {
         ...(settings.enginePath ? { enginePath: settings.enginePath } : {}),
         ...(settings.creatorPath ? { creatorPath: settings.creatorPath } : {}),
         ...(settings.buildType ? { buildType: settings.buildType } : {}),
+        ide: settings.ide || 'vscode',
         ...(input.buildType ? { buildType: input.buildType } : {}),
         onOutput: (value) => append(task, value),
         ...(isEditorHost(task.projectPath) ? { prepareAssets: (request) => prepareInEditor(task, request) } : {}),
@@ -327,7 +343,11 @@ async function execute(task, input, settings) {
         result = await windows().debugWorkspace(options);
         try {
             await openPath(result.workspacePath);
-            append(task, '已请求系统打开调试工作区。在 VS Code 选择生成的调试配置启动。\n');
+            append(task, result.ide === 'visual-studio'
+                ? '已打开 Visual Studio 解决方案，可选择宿主启动项目编译和调试 C++；TS 与资源修改在本面板同步构建。\n'
+                : result.nativeReady
+                    ? '已打开 VS Code 开发工作区；修改后在本面板构建，可附加调试当前宿主。\n'
+                    : '已打开开发工作区，可立即编辑插件。点击“构建并运行”将自动准备宿主并补齐 C++ 编译参数和调试配置。\n');
         } catch (error) {
             throw new Error(`调试工作区已生成到 ${result.workspacePath}，但无法打开：${error.message}`);
         }

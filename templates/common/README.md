@@ -6,9 +6,8 @@ TS + C++ 插件，模板：`{{TEMPLATE}}`，目标平台：Windows。
 
 1. 在工作台选择游戏宿主，关联此源码目录；内嵌安装的插件直接启用扩展。
 2. 编辑 `runtime/` 中的 TS 和 `native/src/` 中的 C++。编辑器入口会将运行时源码同步到宿主 `assets/__plugin_dev/{{NAME}}/`，并保留已有 `.meta` UUID；请勿直接编辑该副本。
-3. 将 `{{CLASS}}Probe` 组件挂到场景节点。
-4. 在插件开发面板准备 Windows 宿主，构建并运行。示例数值接口应返回 `42`。
-5. 使用该宿主生成的调试工作区，可在 `{{CLASS}}Probe.start` 和 `{{CLASS}}Bridge::add` 设置断点。TS 源码断点需要正确的 source map。
+3. 在插件开发面板点击“构建并运行”。工作台自动生成测试场景并挂载 `{{CLASS}}Probe`，准备资源、编译并启动 Windows 宿主。原生注册检查通过后，示例数值接口应返回 `42`。
+4. 选择 VS Code（CMake / clangd）或 Visual Studio（2022 为 `.sln`，2026 为 `.slnx`），打开该宿主的开发工作区。VS Code 支持 TS 与 C++ 断点；Visual Studio 用于 C++ 开发。可在 `{{CLASS}}Probe.start` 和 `{{CLASS}}Bridge::add` 设置断点，TS 源码断点依赖正确的 source map。
 
 浏览器预览使用 JavaScript 回退，此时 `available === false`。Windows 日志中的 `native=true` 和 `C++ bridge ready` 表示实际进入了原生插件。
 

@@ -11,7 +11,7 @@ Cocos Creator 的 Windows 原生插件开发工作台。支持在独立目录或
 - Windows x64、Cocos Creator 3.8.8（Cocos 4.0 实验性支持）
 - Node.js 18+
 - Visual Studio C++ 桌面开发工具集、Windows SDK、CMake、Ninja
-- 可选：VS Code、C/C++ 调试扩展、clangd
+- 可选：VS Code（CMake Tools、C/C++ 调试扩展、clangd），或 Visual Studio IDE
 
 Creator 的 JS 引擎与原生构建的 C++ 引擎版本必须一致。若使用自定义引擎，需在 Creator 偏好设置中同时配置两者并重启编辑器。
 
@@ -28,17 +28,17 @@ node cli.cjs install --project E:/games/MyGame
 
 ## 使用流程
 
-1. 选择游戏宿主，检查 Creator、引擎和编译工具链状态。
+1. 选择游戏宿主。工作台默认读取当前 Creator 的引擎与本机编译工具链。
 2. 输入插件名称，选择模板（`native` 或 `render`）及源码目录创建插件，或直接关联已有插件源码。
 3. 编辑插件源码目录中的 `runtime/`（TS）和 `native/src/`（C++）。
-4. 点击 **首次准备宿主**，生成游戏资源与 Windows 原生工程。
-5. 点击 **构建并运行** 验证结果；需断点调试时打开生成的 VS Code 工作区。
+4. 点击 **构建并运行**。工作台自动生成测试场景，准备 TS 资源和 Windows 原生工程，编译并启动宿主；无需保存当前场景或手动挂载测试组件。
+5. 选择 **VS Code · CMake / clangd** 或 **Visual Studio · 解决方案**，点击 **打开开发工作区**。VS Code 可在首次构建前打开；Visual Studio 会自动准备宿主并生成解决方案，无需先完成编译。
 6. 点击 **打包**，导出可独立安装的插件目录与 ZIP 压缩包。
 
 ### 宿主与源码管理
 
 - **独立源码与接入目录**：宿主根目录的 `plugin-dev.host.json` 记录插件源码相对路径与启用状态（建议纳入游戏版本控制）；宿主 `extensions/<name>` 为自动生成的接入目录，日常开发只需编辑独立源码目录。
-- **运行时 TS 同步**：插件 `runtime/` 会自动同步至宿主 `assets/__plugin_dev/<name>` 并保留已有 `.meta` UUID。模板自带的 `PluginProbe.ts` 可直接挂载到场景节点验证 TS → C++ 调用。
+- **运行时 TS 同步**：插件 `runtime/` 会自动同步至宿主 `assets/__plugin_dev/<name>` 并保留已有 `.meta` UUID。工作台在 `assets/__plugin_dev_host/` 生成专用测试场景，检查原生注册后自动挂载已启用插件的 `PluginProbe.ts`。没有探针的插件只检查原生注册，业务行为需在插件中补充测试。
 - **解除引用与启停**：
   - **禁用**：同步关闭 TS 运行时开关与 `cc_plugin.json` 的 `disabled` 标记，重新构建并重启游戏后生效。
   - **解除引用**：移除所选宿主的接入目录与宿主配置引用，保留独立源码及宿主已导入资源的 UUID。
@@ -52,12 +52,12 @@ node cli.cjs create --plugin-path E:/plugins/my-plugin --name my-plugin --templa
 node cli.cjs link --project E:/games/MyGame --source-path E:/plugins/my-plugin
 node cli.cjs link --project E:/games/TestGame --source-path E:/plugins/my-plugin
 node cli.cjs doctor --project E:/games/MyGame
-node cli.cjs prepare --project E:/games/MyGame
 node cli.cjs build --project E:/games/MyGame --refresh-assets
 node cli.cjs run --project E:/games/MyGame
 node cli.cjs stop --project E:/games/MyGame
 node cli.cjs restart --project E:/games/MyGame
-node cli.cjs debug --project E:/games/MyGame
+node cli.cjs debug --project E:/games/MyGame --ide vscode
+node cli.cjs debug --project E:/games/MyGame --ide visual-studio
 node cli.cjs package --project E:/games/MyGame --name my-plugin --output-dir E:/exports
 node cli.cjs unlink --project E:/games/TestGame --name my-plugin
 ```
@@ -102,10 +102,24 @@ node cli.cjs unlink --project E:/games/TestGame --name my-plugin
 
 ### 断点调试与类型提示
 
-运行 `debug` 命令或在面板点击生成调试配置后，打开宿主 `.plugin-dev/plugin-dev.code-workspace`：
-- **C++ 智能提示与调试**：工作区自动配置 `compile_commands.json` 供 clangd 使用，并提供原生调试启动项。修改 C++ 代码后需重新编译链接并重启游戏。
+在面板选择 IDE 后点击 **打开开发工作区**，或运行 `debug --ide vscode|visual-studio`。
+
+| 开发环境 | 生成内容 | 构建缓存 |
+| --- | --- | --- |
+| VS Code | `.plugin-dev/plugin-dev.code-workspace`，CMake Tools、clangd、C++ 与 TS 调试配置 | `.plugin-dev/build/windows`（Ninja） |
+| Visual Studio | `.plugin-dev/build/visual-studio/` 中的 `.sln` / `.slnx`，引擎、宿主与插件的原生目标 | `.plugin-dev/build/visual-studio`（Visual Studio） |
+
+两种工程使用同一份插件源码、不同的 CMake 缓存。Visual Studio 解决方案按面板当前构建配置生成，切换 Debug / RelWithDebInfo / Release 后重新生成，保持资源、Inspector 与原生库配置一致。工具会选择支持已安装 Visual Studio 版本的 CMake；Creator 自带 CMake 过旧时使用该 Visual Studio 安装的 CMake。
+
+Visual Studio 2022 生成 `.sln`；Visual Studio 2026 生成可直接打开的 `.slnx`。格式沿用 [CMake 官方生成器](https://github.com/Kitware/CMake/commit/e6aa7742b0cc611377cfb4d54415bc4862fc5e1f)，不自行转换解决方案。
+
+- **VS Code CMake 与 clangd**：CMake Tools 使用与工作台一致的源码目录、Ninja 缓存、编译环境和配置参数。clangd 读取 `.plugin-dev/build/windows/compile_commands.json`，CMake 配置后即可获得真实头文件路径和宏定义；首次未配置时仍可编辑源码和使用 TS 类型提示。工作区关闭自动配置，资源同步与完整构建由面板 **构建并运行** 执行；CMake Tools 可用于已准备宿主的原生目标开发。
+- **Visual Studio C++ 调试**：生成的解决方案以宿主可执行目标作为启动项目，调试工作目录指向实际输出目录。在 Visual Studio 中构建和启动，或使用 **附加到进程** 调试工作台已启动的游戏。修改 TS 或资源后先在工作台重新构建资源，再生成解决方案。
+- **工作台 C++ 调试**：游戏已运行时，VS Code 提供对当前 PID 的附加配置；已有构建的启动配置只启动该可执行文件。修改 C++ 后重新编译并重启游戏。
 - **TypeScript 断点调试**：先启动游戏实例，再附加 V8 Inspector（默认端口 `6086`），源码映射直接指向独立插件的 `runtime/` 目录。
 - **多宿主 TypeScript 类型隔离**：每个宿主在 `.plugin-dev/typescript/` 下生成独立的类型项目与本地 TypeScript SDK。首次在 VS Code 打开工作区时，执行 **TypeScript: Select TypeScript Version → Use Workspace Version**，即可为插件源码加载当前宿主与引擎的 `cc` 类型声明。
+
+Visual Studio 解决方案负责原生 C++ 开发；TS 断点使用 VS Code 的 V8 Inspector 附加。二进制打包读取工作台 Ninja 构建的成功记录，Visual Studio 中单独编译不会替换此记录。
 
 可通过环境变量覆盖默认工具路径：`COCOS_CREATOR_PATH`、`COCOS_PLUGIN_NODE`、`COCOS_PLUGIN_CMAKE`、`COCOS_PLUGIN_NINJA`、`COCOS_PLUGIN_CLANGD`、`COCOS_PLUGIN_CLANG_CL`、`VSWHERE_PATH`。若构建异常中断导致残留锁报错 `PROJECT_LOCK_RECOVERY_REQUIRED`，确认无后台构建进程后删除报错提示的锁目录即可。
 

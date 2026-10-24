@@ -66,6 +66,8 @@ flowchart LR
 | `lib/binary-package.cjs` | 根据成功构建记录与 CMake 元数据收集二进制发布内容，生成配置及 ABI 校验信息。 |
 | `lib/package-archive.cjs` | 通过成熟 ZIP 库流式写入发布归档。 |
 | `lib/windows.cjs` | 探测工具链、准备宿主、配置与构建 C++、生成调试工作区。 |
+| `lib/dev-host.cjs` | 生成独立测试场景和启动组件，检查原生注册并自动运行插件探针。 |
+| `lib/ide.cjs` | 配置 VS Code 的 CMake Tools / clangd，选择匹配 Visual Studio 的 CMake 并生成独立 `.sln` / `.slnx`。 |
 | `templates/common/editor/plugin-support.cjs` | 同步运行时文件、检测冲突、记录变更和启停状态；随生成的插件分发。 |
 | `templates/common/editor/typescript-plugin.cjs` | 通过 TypeScript `getExternalFiles` 为原始源码项目加载当前宿主的声明。 |
 | `templates/common/editor/runtime-deployment.cjs` | 校验运行资源归属、内容冲突和部署目录，执行复制及清理。 |
@@ -84,7 +86,9 @@ flowchart LR
 
 C++ 直接参与宿主的 CMake 构建。新增源文件需加入插件的 `CMakeLists.txt`。插件模板引入 `native/third_party/{include,lib,CMakeLists.txt}`，并在构建宿主时将已启用插件的 `native/third_party/bin`、`native/windows/bin` 及 `plugin-dev.json#runtimeFiles` 部署到宿主可执行文件目录。运行文件声明和内容纳入 `nativeFingerprint`；TS、启停和资源变化需要更新 Creator 构建资源。
 
-本机配置、文件指纹、日志及构建缓存保存在项目 `.plugin-dev` 中。原生缓存使用 `.plugin-dev/build/windows`，调试配置写入宿主的独立工作区。
+本机配置、文件指纹、日志及构建缓存保存在项目 `.plugin-dev` 中。工作台与 VS Code 的 Ninja 缓存使用 `.plugin-dev/build/windows`；Visual Studio 解决方案使用 `.plugin-dev/build/visual-studio`，两种生成器不复用缓存。调试配置写入宿主的独立工作区。
+
+首次构建自动生成 `assets/__plugin_dev_host/` 测试场景，明确传入 Creator 的 `scenes` 与 `startScene`，不依赖当前编辑场景。启动组件先检查启用插件的原生类，再挂载插件已有的 `PluginProbe.ts`。场景和脚本 UUID 持久化在 `.plugin-dev/dev-host.json`，重复生成保留 UUID 与 Creator 导入元数据；生成内容发生手工修改时明确报告冲突。
 
 `Debug` 和 `RelWithDebInfo` 开启 V8 Inspector，`Release` 关闭 Inspector。`RelWithDebInfo` 设置 `USE_V8_DEBUGGER_FORCE=ON`，并为宿主 `Game.cpp` 设置启动 Inspector 所需的 `CC_DEBUG=1`；引擎保持当前构建配置。V8 导入库和部署 DLL 均通过 CMake imported target 选择对应配置。构建状态记录规范化后的 `buildType`，配置切换清除 `builtAt`，运行入口检查成功构建记录。
 
@@ -127,6 +131,8 @@ VS Code 从源文件所在目录向上查找 tsconfig。工作台的 TypeScript 
 所选宿主就是当前 Creator 项目时，准备资源使用编辑器构建服务；其他宿主及 CLI 启动指定 Creator，并以目标游戏为工作目录。资源刷新和扩展注册只操作当前编辑器项目。`builder/add-task` 属于版本相关接口，不兼容时会报告错误并提供 CLI 回退步骤。
 
 CMake 管理目标与编译参数，Ninja 执行增量构建。Windows 默认使用 MSVC，也支持 clang-cl；二者均需要匹配的 Windows SDK、MSVC 工具集和第三方库 ABI。clangd 使用 CMake 生成的 `compile_commands.json` 提供代码分析，不参与插件加载。
+
+VS Code 工作区配置 CMake Tools 的源码目录、缓存、工具路径、配置参数与编译器搜索环境，并关闭打开工作区时的自动配置。Visual Studio 生成入口使用 `vswhere` 确认工具集版本，再查询候选 CMake 的 capabilities 选择对应生成器；解决方案以实际宿主可执行目标作为启动项目。每次生成仅启用当前构建配置，避免多配置选择与 Creator 资源、Inspector 开关不一致。IDE 的原生构建不触发第二个 Creator；TS 与资源变更通过工作台资源构建进入宿主。
 
 C++ 和游戏 TS 使用两套调试会话，分别连接原生调试器和 V8 Inspector。各宿主的工作区加入独立源码目录，clangd 使用该宿主编译数据库，TS 源码映射将导入副本定位回原始文件。生成的 `plugin-enabled.ts` 仍定位宿主副本。TS 源码断点依赖 source map；工具不提供跨语言统一单步或 DLL 热替换。
 

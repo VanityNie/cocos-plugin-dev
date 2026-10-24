@@ -24,6 +24,7 @@ for (const [buildType, symbolFormat] of [['Debug', 'Zi'], ['RelWithDebInfo', 'Zi
     fs.mkdirSync(path.join(project, 'assets'), { recursive: true });
     support.writeJson(path.join(project, 'package.json'), { name: 'binary-symbols-host' });
     fs.cpSync(path.join(fixtures, 'plugin'), plugin, { recursive: true });
+    fs.renameSync(path.join(plugin, 'native/cc_plugin.json.fixture'), path.join(plugin, 'native/cc_plugin.json'));
     for (const file of ['CMakeLists.txt', 'base.cpp']) fs.copyFileSync(path.join(fixtures, file), path.join(project, file));
     core.syncPlugin({ projectPath: project, name: 'binary-symbols' });
     const report = await windows.doctor({ projectPath: project });
