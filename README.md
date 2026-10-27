@@ -31,9 +31,9 @@ node cli.cjs install --project E:/games/MyGame
 1. 选择游戏宿主。工作台默认读取当前 Creator 的引擎与本机编译工具链。
 2. 输入插件名称，选择模板（`native` 或 `render`）及源码目录创建插件，或直接关联已有插件源码。
 3. 编辑插件源码目录中的 `runtime/`（TS）和 `native/src/`（C++）。
-4. 点击 **构建并运行**。工作台自动生成测试场景，准备 TS 资源和 Windows 原生工程，编译并启动宿主；无需保存当前场景或手动挂载测试组件。
+4. 点击 **构建并运行**。工作台自动生成测试场景，准备 TS 资源和 Windows 原生工程，编译并启动宿主；无需保存当前场景或手动挂载测试组件。面板持续显示游戏日志，包括原生注册检查、`PluginProbe` 输出和运行错误。完整日志保存在宿主 `.plugin-dev/logs/runtime.log`。
 5. 选择 **VS Code · CMake / clangd** 或 **Visual Studio · 解决方案**，点击 **打开开发工作区**。VS Code 可在首次构建前打开；Visual Studio 会自动准备宿主并生成解决方案，无需先完成编译。
-6. 点击 **打包**，导出可独立安装的插件目录与 ZIP 压缩包。
+6. 点击 **打包** 导出源码插件，或点击 **打包二进制** 导出最近成功构建的 Windows 原生库及依赖。面板显示导出的插件目录与 ZIP 路径。
 
 ### 宿主与源码管理
 
@@ -132,7 +132,7 @@ Visual Studio 解决方案负责原生 C++ 开发；TS 断点使用 VS Code 的 
 
 通过 `package` 导出的插件包内含当前源码快照、资源 UUID 种子及 `contributions.builder` 构建钩子。将导出的插件目录放入其他 Creator 项目的 `extensions/` 并启用后，直接使用 Creator 正常构建 Windows 平台即可自动完成 TS 同步、CMake 挂载与运行时 DLL／资源部署，目标项目无需安装本工作台。
 
-需要分发已编译的原生库时，使用 `package --binary`：
+需要分发已编译的原生库时，点击面板的 **打包二进制**，或使用 `package --binary`：
 
 ```powershell
 node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --output-dir E:/exports

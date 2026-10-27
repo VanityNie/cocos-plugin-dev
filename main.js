@@ -6,6 +6,8 @@ const fs = require('fs');
 const path = require('path');
 const PACKAGE_NAME = 'cocos-plugin-dev';
 const tasks = new Map();
+const runtimes = new Map();
+let nextRuntimeId = 0;
 let activeTask = null;
 let nextTaskId = 0;
 let selectedHost = null;
@@ -75,6 +77,7 @@ function writeSettings(project, values) {
 
 function core() { return require('./lib/core.cjs'); }
 function windows() { return require('./lib/windows.cjs'); }
+function runLog() { return require(path.join(__dirname, 'lib/run-log.cjs')); }
 function support() { return require(path.join(__dirname, 'templates/common/editor/plugin-support.cjs')); }
 
 function normalizedEngine(value) {
@@ -169,6 +172,78 @@ function snapshot(task, after = 0) {
     };
 }
 
+function connectRuntime(project, info, fromStart = false) {
+    const key = info.pid ? `${info.pid}:${info.startedAt}` : null;
+    const current = runtimes.get(project);
+    if (key && current?.key === key) return current;
+    current?.reader.close();
+    const runtime = {
+        id: `${Date.now()}-${++nextRuntimeId}`, key, identity: info.pid ? info : null,
+        logPath: info.logPath, initialOffset: fromStart ? info.logOffset : undefined,
+        reader: runLog().createRunLogReader(project),
+        logs: [], sequence: 0, logLength: 0, running: Boolean(info.pid), hasMore: false, ended: false,
+    };
+    runtimes.set(project, runtime);
+    return runtime;
+}
+
+function appendRuntime(runtime, text) {
+    if (!text) return;
+    runtime.logs.push({ seq: ++runtime.sequence, text });
+    runtime.logLength += text.length;
+    while (runtime.logs.length > 1 && (runtime.logs.length > 1500 || runtime.logLength > 200000)) {
+        runtime.logLength -= runtime.logs.shift().text.length;
+    }
+}
+
+function updateRuntime(project) {
+    const file = path.join(project, '.plugin-dev/game-process.json');
+    support().noLinks(project, file);
+    const record = fs.existsSync(file) ? support().readJson(file) : null;
+    const key = record?.identity?.pid ? `${record.identity.pid}:${record.identity.startedAt}` : null;
+    let runtime = runtimes.get(project);
+    if (record && key && runtime?.key !== key) {
+        runtime = connectRuntime(project, { ...record.identity, logPath: record.logPath, logOffset: record.logOffset });
+    }
+    if (!runtime) return null;
+    let running = Boolean(key && runtime.key === key);
+    if (running) {
+        try { process.kill(runtime.identity.pid, 0); }
+        catch (error) {
+            if (error.code !== 'ESRCH') throw error;
+            running = false;
+        }
+    }
+    const chunk = runtime.reader.read({ logPath: runtime.logPath, offset: runtime.initialOffset, identity: runtime.identity, running });
+    if (!chunk.exists) {
+        runtime.running = running;
+        return runtime.hasRead || running ? runtime : null;
+    }
+    runtime.initialOffset = undefined;
+    if (chunk.truncated) appendRuntime(runtime, '[正在显示最近的游戏日志；完整内容保存在运行日志文件中。]\n');
+    else if (chunk.reset && runtime.hasRead) appendRuntime(runtime, '[游戏日志文件已重新开始。]\n');
+    appendRuntime(runtime, chunk.text);
+    runtime.hasRead = true;
+    runtime.running = running;
+    runtime.hasMore = chunk.hasMore;
+    if (!running && !chunk.hasMore && !runtime.ended) {
+        appendRuntime(runtime, '\n游戏进程已结束。\n');
+        runtime.ended = true;
+    }
+    return runtime;
+}
+
+function runtimeSnapshot(project, after = 0, id) {
+    // 每次面板请求按位置读取一段文件；面板关闭后没有后台轮询。
+    const runtime = updateRuntime(project);
+    if (!runtime) return null;
+    const cursor = runtime.id === id ? Number(after) || 0 : 0;
+    return {
+        id: runtime.id, sequence: runtime.sequence, logs: runtime.logs.filter(line => line.seq > cursor),
+        running: runtime.running, hasMore: runtime.hasMore, logPath: runtime.logPath, pid: runtime.identity?.pid,
+    };
+}
+
 async function refreshAssets(task) {
     if (!isEditorHost(task.projectPath)) return;
     try {
@@ -237,9 +312,42 @@ function requestCancellation(task) {
 }
 
 function logRunResult(task, result) {
+    connectRuntime(task.projectPath, result, !result.alreadyRunning);
     append(task, result && result.alreadyRunning
-        ? '游戏已在运行，未启动新进程。\n'
-        : '游戏进程已启动，运行状态请查看游戏画面和日志。\n');
+        ? '游戏已在运行，正在接收游戏日志。\n'
+        : '游戏进程已启动，游戏输出将持续显示在下方。\n');
+}
+
+function logResult(task, result) {
+    if (!result) return;
+    switch (task.action) {
+    case 'create':
+    case 'link':
+        append(task, `插件源码：${result.pluginPath}\n`);
+        break;
+    case 'sync':
+        append(task, `插件 ${result.name} 的运行时文件已同步。\n`);
+        break;
+    case 'package':
+        append(task, `${result.binary ? '二进制插件' : '源码插件'}已导出${result.buildType ? `（${result.buildType}）` : ''}。\nZIP：${result.zipPath}\n插件目录：${result.packagePath}\n`);
+        break;
+    case 'doctor':
+        for (const check of result.checks) append(task, `${check.ok ? '通过' : check.required ? '需要处理' : '提示'} · ${check.name}：${check.message}\n`);
+        break;
+    case 'prepare':
+        append(task, `宿主资源已准备：${result.resourceDir}\n`);
+        break;
+    case 'configure':
+        append(task, `原生构建已配置（${result.buildType}）：${result.buildDir}\n`);
+        break;
+    case 'build':
+        append(task, `构建完成（${result.builtBuildType}）：${result.executable}\n`);
+        break;
+    case 'debug':
+        append(task, `开发工作区：${result.workspacePath}\n`);
+        break;
+    }
+    for (const warning of result.warnings || []) append(task, `提示：${warning}\n`);
 }
 
 async function execute(task, input, settings) {
@@ -252,6 +360,7 @@ async function execute(task, input, settings) {
         ide: settings.ide || 'vscode',
         ...(input.buildType ? { buildType: input.buildType } : {}),
         onOutput: (value) => append(task, value),
+        onRunStarted: (info) => connectRuntime(task.projectPath, info, !info.alreadyRunning),
         ...(isEditorHost(task.projectPath) ? { prepareAssets: (request) => prepareInEditor(task, request) } : {}),
         signal: task.controller.signal,
     };
@@ -354,11 +463,11 @@ async function execute(task, input, settings) {
         break;
     default: throw new Error('未知操作。');
     }
-    if (result !== undefined) append(task, JSON.stringify(result, null, 2) + '\n');
+    logResult(task, result);
     return result;
 }
 
-async function contextFor(project) {
+async function contextFor(project, runtimeAfter = 0, runtimeId) {
     const plugins = await core().listPlugins({ projectPath: project, includeErrors: true });
     const lastTask = Array.from(tasks.values()).reverse().find((task) => task.projectPath === project);
     const settings = readSettings(project);
@@ -373,14 +482,16 @@ async function contextFor(project) {
     }
     return {
         projectPath: project, editorProjectPath: editorProjectPath(), isEditorHost: isEditorHost(project), settings, engineError,
-        plugins, task: snapshot(lastTask),
+        plugins, task: snapshot(lastTask), runtime: runtimeSnapshot(project, runtimeAfter, runtimeId),
     };
 }
 
 exports.methods = {
     openPanel() { return Editor.Panel.open(PACKAGE_NAME); },
 
-    getContext() { return contextFor(projectPath()); },
+    getContext(runtimeAfter = 0, runtimeId) { return contextFor(projectPath(), runtimeAfter, runtimeId); },
+
+    getRuntimeLog(after = 0, id) { return runtimeSnapshot(projectPath(), after, id); },
 
     async selectHost(value) {
         if (activeTask || selectingHost) throw new Error('当前操作完成后才能切换宿主。');
@@ -426,6 +537,7 @@ exports.methods = {
             task.status = task.outcome || 'succeeded';
             append(task, task.status === 'attention' ? '操作需要后续处理。\n' : '操作完成。\n');
         }).catch((error) => {
+            if (error.runLog) connectRuntime(project, error.runLog, true);
             if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
                 task.status = 'cancelled';
                 append(task, '操作已取消。\n');
@@ -467,6 +579,8 @@ exports.methods = {
 
 exports.load = function load() {};
 exports.unload = function unload() {
+    for (const runtime of runtimes.values()) runtime.reader.close();
+    runtimes.clear();
     if (activeTask && CANCELLABLE_ACTIONS.has(activeTask.action) && !activeTask.cancellationClosed) {
         requestCancellation(activeTask);
         console.warn('[cocos-plugin-dev] 扩展已卸载，正在取消当前任务；已启动的 Creator 资源阶段仍需等待结束。');

@@ -59,10 +59,71 @@ function updateToggleButtons(panel) {
         toggleHost.textContent = hostDetails.open ? '收起宿主' : '切换项目';
     }
 }
+function appendLog(panel, text) {
+    if (!text) return;
+    const log = query(panel, '#log');
+    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
+    log.appendChild(log.ownerDocument.createTextNode(text));
+    const content = log.textContent;
+    if (content.length > 200000) log.textContent = '[较早日志已截断]\n' + content.slice(-180000);
+    if (atBottom) log.scrollTop = log.scrollHeight;
+}
+function invalidateRuntime(panel, reset = false) {
+    clearTimeout(panel._runtimeTimer);
+    panel._runtimeGeneration++;
+    if (reset) {
+        panel._runtimeId = null;
+        panel._runtimeSequence = 0;
+    }
+}
+function invalidateTask(panel) {
+    clearTimeout(panel._timer);
+    panel._taskGeneration++;
+    panel._cancelRequested = false;
+}
+function showRuntime(panel, runtime) {
+    if (!runtime) {
+        panel._runtimeId = null;
+        panel._runtimeSequence = 0;
+        return;
+    }
+    const changed = panel._runtimeId !== runtime.id;
+    const previousSequence = changed ? 0 : panel._runtimeSequence;
+    if (runtime.sequence < previousSequence) return;
+    panel._runtimeId = runtime.id;
+    panel._runtimeSequence = runtime.sequence;
+    const text = runtime.logs.filter(line => line.seq > previousSequence).map(line => line.text).join('');
+    appendLog(panel, `${changed && text ? '\n[游戏运行日志]\n' : ''}${text}`);
+    if (!panel._busy && panel._taskStatus === 'succeeded' && ['run', 'restart', 'build-run'].includes(panel._taskAction)
+        && !runtime.running && !runtime.hasMore) {
+        query(panel, '#task-detail').textContent = '游戏进程已结束，运行结果见下方日志。';
+    }
+}
+function scheduleRuntimePoll(panel, delay = 700) {
+    clearTimeout(panel._runtimeTimer);
+    const generation = panel._runtimeGeneration;
+    const project = panel._projectPath;
+    const current = () => !panel._closed && panel._runtimeGeneration === generation && panel._projectPath === project;
+    panel._runtimeTimer = setTimeout(async () => {
+        if (!current()) return;
+        try {
+            const previousId = panel._runtimeId;
+            const after = panel._runtimeSequence;
+            const runtime = await request('get-runtime-log', after, previousId);
+            if (!current()) return;
+            showRuntime(panel, runtime);
+            if (runtime && (runtime.running || runtime.hasMore)) scheduleRuntimePoll(panel, runtime.hasMore ? 0 : 700);
+        } catch (error) {
+            if (current()) notice(panel, `无法读取游戏运行日志：${error.message}。请点击刷新。`);
+        }
+    }, delay);
+}
 function showTask(panel, task) {
     const previousSequence = panel._task === task.id ? panel._sequence : 0;
     if (task.sequence < previousSequence) return;
     panel._task = task.id;
+    panel._taskAction = task.action;
+    panel._taskStatus = task.status;
     panel._sequence = task.sequence;
     const label = query(panel, '#task-status');
     label.className = `status ${task.status}`;
@@ -80,24 +141,22 @@ function showTask(panel, task) {
         : task.status === 'attention' ? '操作需要后续处理，请查看下方日志中的具体步骤。'
             : task.status === 'failed' ? '操作未完成。修复日志中的错误后重新执行。'
                 : task.action === 'stop' ? (task.result && task.result.stopped ? '游戏进程已停止。' : '当前没有由工作台管理的运行中游戏。')
-                : ['run', 'restart', 'build-run'].includes(task.action) ? (task.result && task.result.alreadyRunning ? '游戏已在运行，未启动新进程。' : '游戏进程已启动；请通过游戏画面、运行日志或断点验证插件行为。') : '操作已结束，详细结果见下方日志。';
-    const log = query(panel, '#log');
-    const atBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 60;
-    if (task.logs.length) {
-        log.textContent += task.logs.filter((line) => line.seq > previousSequence).map((line) => line.text).join('');
-        if (log.textContent.length > 200000) log.textContent = '[较早日志已截断]\n' + log.textContent.slice(-180000);
-        if (atBottom) log.scrollTop = log.scrollHeight;
-    }
+                : ['run', 'restart', 'build-run'].includes(task.action) ? '游戏输出持续显示在下方，可继续执行其他操作。' : '操作已结束，详细结果见下方日志。';
+    appendLog(panel, task.logs.filter((line) => line.seq > previousSequence).map((line) => line.text).join(''));
     busy(panel, isPending(task));
 }
 function schedulePoll(panel) {
     clearTimeout(panel._timer);
+    const generation = panel._taskGeneration;
+    const project = panel._projectPath;
+    const taskId = panel._task;
+    const current = () => !panel._closed && panel._taskGeneration === generation
+        && panel._projectPath === project && panel._task === taskId;
     panel._timer = setTimeout(async () => {
-        if (panel._closed) return;
+        if (!current()) return;
         try {
-            const taskId = panel._task;
             const task = await request('get-task', taskId, panel._sequence);
-            if (panel._closed || panel._task !== taskId) return;
+            if (!current()) return;
             showTask(panel, task);
             if (isPending(task)) schedulePoll(panel);
             else {
@@ -105,48 +164,65 @@ function schedulePoll(panel) {
                 await refresh(panel, false);
             }
         } catch (error) {
-            if (panel._closed) return;
+            if (!current()) return;
             notice(panel, `无法读取任务进度：${error.message}。请点击刷新。`);
-            // Keep the UI locked until the authoritative main-process state is refreshed.
+            // 通过刷新读取主进程状态后，再恢复操作按钮。
         }
     }, 700);
 }
 
 async function start(panel, action, input = {}) {
-    if (panel._busy) return;
+    if (panel._busy || panel._submitting) return;
+    panel._submitting = true;
+    panel._contextGeneration++;
+    invalidateTask(panel);
+    invalidateRuntime(panel, true);
     busy(panel, true);
     notice(panel, '');
+    let failed = false;
     try {
         await request('save-settings', settings(panel));
+        if (panel._closed) return;
         panel._cancelRequested = false;
         const task = await request('start-task', action, { ...input, refreshAssets: query(panel, '#refresh-assets').checked });
         if (panel._closed) return;
         query(panel, '#log').textContent = '';
         showTask(panel, task);
         schedulePoll(panel);
+        if (['run', 'restart', 'build-run'].includes(action)) scheduleRuntimePoll(panel, 0);
     } catch (error) {
         if (panel._closed) return;
         busy(panel, false);
         notice(panel, error.message || String(error));
+        failed = true;
+    } finally {
+        panel._submitting = false;
     }
+    if (failed) await refresh(panel);
 }
 
 async function cancel(panel) {
     if (!panel._task || panel._cancelRequested) return;
+    const generation = panel._taskGeneration;
+    const taskId = panel._task;
+    const project = panel._projectPath;
+    const current = () => !panel._closed && panel._taskGeneration === generation
+        && panel._task === taskId && panel._projectPath === project;
     panel._cancelRequested = true;
     query(panel, '#cancel-task').disabled = true;
     try {
-        const task = await request('cancel-task', panel._task);
-        if (panel._closed) return;
+        const task = await request('cancel-task', taskId);
+        if (!current()) return;
         showTask(panel, task);
         schedulePoll(panel);
     } catch (error) {
-        if (!panel._closed) {
+        if (current()) {
+            panel._cancelRequested = false;
             notice(panel, error.message || String(error));
             await refresh(panel);
         }
     } finally {
-        panel._cancelRequested = false;
+        if (current()) panel._cancelRequested = false;
     }
 }
 
@@ -181,18 +257,25 @@ function renderPlugins(panel, plugins) {
         }
         row.appendChild(info);
         const actions = textElement(document, 'div', '', 'plugin-actions');
-        const operations = plugin.error ? [] : [['enable', plugin.enabled ? '禁用' : '启用'], ['source', '打开源码'], ['sync', '同步'], ['package', '打包']];
+        const operations = plugin.error ? [] : [
+            ['enable', plugin.enabled ? '禁用' : '启用'], ['source', '打开源码'], ['sync', '同步'],
+            ['package', '打包'], ['package', '打包二进制', { binary: true }],
+        ];
         if (plugin.sourceType === 'local') operations.push(['unlink', '解除引用']);
-        for (const [action, title] of operations) {
+        for (const [action, title, operationInput = {}] of operations) {
             const button = textElement(document, 'button', title);
             button.type = 'button';
             button.dataset.op = action;
+            if (operationInput.binary) {
+                button.dataset.binary = 'true';
+                button.title = '导出最近成功构建配置的 Windows 二进制插件包';
+            }
             if (action !== 'source') button.setAttribute('data-mutation', '');
             button.addEventListener('click', async () => {
                 if (action === 'source') {
                     try { await request('open-source', plugin.name); }
                     catch (error) { notice(panel, error.message); }
-                } else await start(panel, action, { name: plugin.name, enabled: !plugin.enabled });
+                } else await start(panel, action, { name: plugin.name, enabled: !plugin.enabled, ...operationInput });
             });
             actions.appendChild(button);
         }
@@ -216,6 +299,10 @@ function applyContext(panel, context, restoreTask) {
         ? '当前操作作用于已打开的项目。添加引用后自动加载源码监视，资源构建使用当前编辑器。'
         : '当前操作作用于所选宿主，不会切换当前编辑器。资源构建前请保存并关闭该宿主的其他 Creator 窗口；打开该宿主并启用插件后启动源码监视。';
     const changedHost = panel._projectPath !== context.projectPath;
+    if (changedHost) {
+        invalidateRuntime(panel, true);
+        invalidateTask(panel);
+    }
     panel._projectPath = context.projectPath;
     const hasPlugins = Array.isArray(context.plugins) && context.plugins.length > 0;
     if (!panel._settingsLoaded || changedHost) {
@@ -243,6 +330,8 @@ function applyContext(panel, context, restoreTask) {
     if (restoreTask && context.task) {
         query(panel, '#log').textContent = '';
         panel._sequence = 0;
+        panel._runtimeId = null;
+        panel._runtimeSequence = 0;
         showTask(panel, context.task);
         if (isPending(context.task)) schedulePoll(panel);
     } else if (restoreTask) {
@@ -250,6 +339,8 @@ function applyContext(panel, context, restoreTask) {
         if (changedHost) {
             clearTimeout(panel._timer);
             panel._task = null;
+            panel._taskAction = null;
+            panel._taskStatus = null;
             panel._sequence = 0;
             query(panel, '#task-status').textContent = '就绪';
             query(panel, '#task-status').className = 'status';
@@ -258,29 +349,51 @@ function applyContext(panel, context, restoreTask) {
             query(panel, '#log').textContent = '';
         }
     }
+    showRuntime(panel, context.runtime);
+    if (context.runtime && (context.runtime.running || context.runtime.hasMore)) {
+        scheduleRuntimePoll(panel, context.runtime.hasMore ? 0 : 700);
+    }
 }
 
 async function refresh(panel, restoreTask = true) {
+    if (panel._submitting || panel._closed) return;
+    const generation = ++panel._contextGeneration;
+    invalidateTask(panel);
+    invalidateRuntime(panel);
     try {
-        const context = await request('get-context');
-        if (panel._closed) return;
+        const context = await (!restoreTask && panel._runtimeId
+            ? request('get-context', panel._runtimeSequence, panel._runtimeId)
+            : request('get-context'));
+        if (panel._closed || panel._contextGeneration !== generation) return;
         applyContext(panel, context, restoreTask);
     } catch (error) {
-        if (!panel._closed) notice(panel, error.message || String(error));
+        if (!panel._closed && panel._contextGeneration === generation) notice(panel, error.message || String(error));
     }
 }
 
 async function selectHost(panel, host) {
-    if (panel._busy) return;
+    if (panel._busy || panel._submitting) return;
+    panel._submitting = true;
     busy(panel, true);
     notice(panel, '');
+    const generation = ++panel._contextGeneration;
+    invalidateTask(panel);
+    invalidateRuntime(panel);
+    let failed = false;
     try {
         const context = await request('select-host', host);
-        if (panel._closed) return;
+        if (panel._closed || panel._contextGeneration !== generation) return;
         applyContext(panel, context, true);
     } catch (error) {
-        if (!panel._closed) { busy(panel, false); notice(panel, error.message); }
+        if (!panel._closed && panel._contextGeneration === generation) {
+            busy(panel, false);
+            notice(panel, error.message);
+            failed = true;
+        }
+    } finally {
+        panel._submitting = false;
     }
+    if (failed) await refresh(panel);
 }
 
 async function chooseDirectory(panel, selector, parent = false) {
@@ -301,9 +414,17 @@ module.exports = Editor.Panel.define({
     ready() {
         this._closed = false;
         this._busy = false;
+        this._submitting = false;
         this._settingsLoaded = false;
         this._lastPluginCount = 0;
         this._sequence = 0;
+        this._taskAction = null;
+        this._taskStatus = null;
+        this._taskGeneration = 0;
+        this._contextGeneration = 0;
+        this._runtimeGeneration = 0;
+        this._runtimeId = null;
+        this._runtimeSequence = 0;
         this._cancelRequested = false;
         query(this, '#refresh').addEventListener('click', () => refresh(this));
         query(this, '#cancel-task').addEventListener('click', () => cancel(this));
@@ -371,6 +492,7 @@ module.exports = Editor.Panel.define({
     },
     close() {
         this._closed = true;
-        clearTimeout(this._timer);
+        invalidateTask(this);
+        invalidateRuntime(this);
     },
 });

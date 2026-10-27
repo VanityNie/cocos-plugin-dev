@@ -84,6 +84,11 @@
           "getTask"
         ]
       },
+      "get-runtime-log": {
+        "methods": [
+          "getRuntimeLog"
+        ]
+      },
       "cancel-task": {
         "methods": [
           "cancelTask"

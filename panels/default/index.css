@@ -508,6 +508,12 @@ button:disabled {
   gap: 6px;
 }
 
+#ide {
+  flex: 0 1 210px;
+  width: auto;
+  max-width: 100%;
+}
+
 .flow-arrow {
   color: var(--color-normal-contrast-emphasis, #8f8f8f);
   font-size: 11px;

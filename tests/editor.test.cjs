@@ -170,7 +170,7 @@ test('run, stop and restart preserve process results and do not claim duplicate 
     });
     const run = methods.startTask('run');
     await nextTurn();
-    assert.match(methods.getTask(run.id).logs.map((line) => line.text).join(''), /游戏已在运行，未启动新进程/);
+    assert.match(methods.getTask(run.id).logs.map((line) => line.text).join(''), /游戏已在运行，正在接收游戏日志/);
     const stop = methods.startTask('stop');
     await nextTurn();
     assert.match(methods.getTask(stop.id).logs.map((line) => line.text).join(''), /没有由工作台管理/);
@@ -837,4 +837,65 @@ test('panel package task ignores saved buildType and exports source package clea
     assert.equal(done.status, 'succeeded', done.error);
     assert.equal(done.result.binary, false);
     assert.ok(fs.existsSync(done.result.zipPath));
+});
+
+test('panel binary package button and incremental runtime log streaming avoid redundant full reloads', async (t) => {
+    const { methods, project } = editorHarness(t, {
+        run: async (options) => {
+            const logPath = path.join(project, '.plugin-dev/logs/runtime.log');
+            fs.mkdirSync(path.dirname(logPath), { recursive: true });
+            fs.writeFileSync(logPath, '[PluginProbe] sample: ready\n');
+            const info = { pid: process.pid, startedAt: '2026-10-27T00:00:00Z', executable: process.execPath, logPath, logOffset: 0, alreadyRunning: false };
+            fs.writeFileSync(path.join(project, '.plugin-dev/game-process.json'), JSON.stringify({ identity: info, logPath, logOffset: 0 }));
+            options.onRunStarted?.(info);
+            return info;
+        },
+    }, {
+        listPlugins: () => [{ name: 'sample', displayName: 'Sample', template: 'native', enabled: true, sourceType: 'embedded', pluginPath: path.join(project, 'extensions/sample') }],
+        packagePlugin: async (options) => ({ name: options.name, binary: Boolean(options.binary), buildType: 'Debug', zipPath: 'E:/out/sample.zip', packagePath: 'E:/out/sample' }),
+    });
+    const dom = new JSDOM(fs.readFileSync(path.join(root, 'panels/default/index.html'), 'utf8'));
+    const timers = [];
+    const contextCalls = [];
+    const module = { exports: {} };
+    vm.runInNewContext(fs.readFileSync(path.join(root, 'panels/default/index.js'), 'utf8'), {
+        module, require, __dirname: path.join(root, 'panels/default'),
+        setTimeout: (callback) => { timers.push(callback); return timers.length; }, clearTimeout: () => {},
+        Editor: {
+            Panel: { define: (options) => options },
+            Message: { request: async (pkg, message, ...args) => {
+                if (message === 'get-context') { contextCalls.push(args); return methods.getContext(...args); }
+                if (message === 'get-runtime-log') return methods.getRuntimeLog(...args);
+                if (message === 'save-settings') return methods.saveSettings(...args);
+                if (message === 'start-task') return methods.startTask(...args);
+                if (message === 'get-task') return methods.getTask(...args);
+                throw new Error(`Unexpected message: ${message}`);
+            } },
+        },
+    });
+    const panel = { $: { app: dom.window.document.querySelector('#app') } };
+    const query = (selector) => panel.$.app.querySelector(selector);
+    try {
+        module.exports.ready.call(panel);
+        await nextTurn();
+        const binaryButton = query('.plugin-actions button[data-binary="true"]');
+        assert.equal(binaryButton.textContent, '打包二进制');
+        binaryButton.click();
+        await nextTurn();
+        await nextTurn();
+        await timers.shift()();
+        assert.match(query('#log').textContent, /二进制插件已导出（Debug）/);
+        assert.doesNotMatch(query('#log').textContent, /"zipPath"/);
+
+        query('[data-action="run"]').click();
+        await nextTurn();
+        await nextTurn();
+        // Run 0ms initial runtime poll before 700ms task completion poll
+        for (const callback of timers.splice(0).reverse()) await callback();
+        assert.match(query('#log').textContent, /\[游戏运行日志\]\n\[PluginProbe\] sample: ready/);
+        assert.equal(contextCalls.at(-1)[0], 1);
+    } finally {
+        module.exports.close.call(panel);
+        dom.window.close();
+    }
 });

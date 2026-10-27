@@ -66,6 +66,7 @@ flowchart LR
 | `lib/binary-package.cjs` | 根据成功构建记录与 CMake 元数据收集二进制发布内容，生成配置及 ABI 校验信息。 |
 | `lib/package-archive.cjs` | 通过成熟 ZIP 库流式写入发布归档。 |
 | `lib/windows.cjs` | 探测工具链、准备宿主、配置与构建 C++、生成调试工作区。 |
+| `lib/run-log.cjs` | 按文件位置增量读取游戏日志，保存跨读取块的 UTF-8 字符并限制单次读取量。 |
 | `lib/dev-host.cjs` | 生成独立测试场景和启动组件，检查原生注册并自动运行插件探针。 |
 | `lib/ide.cjs` | 配置 VS Code 的 CMake Tools / clangd，选择匹配 Visual Studio 的 CMake 并生成独立 `.sln` / `.slnx`。 |
 | `templates/common/editor/plugin-support.cjs` | 同步运行时文件、检测冲突、记录变更和启停状态；随生成的插件分发。 |
@@ -79,6 +80,10 @@ flowchart LR
 取消请求通过 `AbortSignal` 传递到构建流程。任务在子进程退出前保持锁定，取消完成后才恢复操作。Creator 编辑器内的资源构建等待当前阶段结束后停止后续步骤。
 
 游戏进程按项目记录 PID、启动时间和可执行文件路径，停止前重新核对身份。运行、停止和重启使用跨进程锁；构建前停止工具管理的游戏实例。其他工具启动的进程不由工作台接管。
+
+游戏 stdout 与 stderr 写入 `.plugin-dev/logs/runtime.log`，启动记录保存本次输出的起始位置。面板通过独立的 `get-runtime-log` 请求持续读取，构建任务结束后仍可显示游戏输出。每次最多读取 64 KiB，历史预览与面板文本均限制长度；关闭面板停止轮询，游戏继续运行。进程结束后读取剩余内容，文件读取错误直接显示在面板中。操作结果仅显示必要状态、提示与输出路径。
+
+工作台的 CMake 配置向宿主可执行目标加入 `lib/cmake/runtime-log.cpp`；工作台启动游戏时通过 `CPD_RUNTIME_LOG=1` 启用。宿主在启动阶段将 CRT 的 `LC_CTYPE` 设为 UTF-8，每 200 毫秒批量刷新 stdout/stderr，正常退出时完成最后一次刷新。该文件独立于插件静态库。Windows UCRT 的 `wprintf` 对 emoji 等代理对字符存在输出限制，面板保留日志文件中的原始内容。
 
 ## 源码与构建状态
 
