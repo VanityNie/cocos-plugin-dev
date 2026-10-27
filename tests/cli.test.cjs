@@ -10,7 +10,7 @@ const { EventEmitter } = require('node:events');
 const { spawnSync } = require('node:child_process');
 const { parseArgs, createSandbox } = require('../cli.cjs');
 
-function cliHarness(windows = {}) {
+function cliHarness(windows = {}, android = {}) {
     const fakeProcess = new EventEmitter();
     const output = { stdout: '', stderr: '' };
     fakeProcess.stdout = { write: (text) => { output.stdout += text; } };
@@ -20,7 +20,7 @@ function cliHarness(windows = {}) {
     const root = path.resolve(__dirname, '..');
     vm.runInNewContext(fs.readFileSync(path.join(root, 'cli.cjs'), 'utf8'), {
         module, exports: module.exports, __dirname: root, process: fakeProcess, AbortController,
-        require: (id) => id === './lib/windows.cjs' ? windows : require(id),
+        require: (id) => id === './lib/windows.cjs' ? windows : id === './lib/android.cjs' ? android : require(id),
     }, { filename: path.join(root, 'cli.cjs') });
     return { ...module.exports, process: fakeProcess, output };
 }
@@ -33,6 +33,13 @@ test('CLI accepts explicit values and rejects misspelled or ambiguous flags', ()
     assert.equal(parseArgs(['create', '--plugin-path', './plugin']).options.pluginPath, path.resolve('plugin'));
     assert.equal(parseArgs(['link', '--source-path', './plugin']).options.sourcePath, path.resolve('plugin'));
     assert.equal(parseArgs(['build', '--project', '.', '--build-type', 'RelWithDebInfo']).options.buildType, 'RelWithDebInfo');
+    const androidArgs = parseArgs(['build', '--project', '.', '--platform', 'ANDROID', '--abi', 'ARM64-V8A', '--ndk-path', './ndk']);
+    assert.equal(androidArgs.options.platform, 'android');
+    assert.equal(androidArgs.options.abi, 'arm64-v8a');
+    assert.equal(androidArgs.options.ndkPath, path.resolve('ndk'));
+    assert.throws(() => parseArgs(['build', '--project', '.', '--abi', 'arm64-v8a']), /requires --platform android/);
+    assert.throws(() => parseArgs(['run', '--project', '.', '--platform', 'android']), /only available for/);
+    assert.throws(() => parseArgs(['package', '--project', '.', '--name', 'demo', '--platform', 'android']), /必须同时指定 --binary/);
 });
 
 test('CLI creates independent source, attaches two hosts and keeps enable state local', t => {
@@ -101,6 +108,22 @@ test('CLI routes stop and restart with the selected project and cancellation sig
     }
     assert.match(cli.output.stdout, /"action": "stop"/);
     assert.match(cli.output.stdout, /"action": "restart"/);
+});
+
+test('CLI routes doctor, configure, and build with --platform android to lib/android.cjs', async () => {
+    const androidCalls = [];
+    const cli = cliHarness({}, Object.fromEntries(['doctor', 'configure', 'build'].map((action) => [action, async (options) => {
+        androidCalls.push({ action, abi: options.abi, platform: options.platform });
+        return { action, platform: 'android', abi: options.abi };
+    }])));
+    for (const action of ['doctor', 'configure', 'build']) {
+        await cli.main([action, '--project', '.', '--platform', 'android', '--abi', 'x86_64']);
+    }
+    assert.deepEqual(androidCalls, [
+        { action: 'doctor', abi: 'x86_64', platform: 'android' },
+        { action: 'configure', abi: 'x86_64', platform: 'android' },
+        { action: 'build', abi: 'x86_64', platform: 'android' },
+    ]);
 });
 
 test('pre-cancelled CLI does not dispatch a command', async () => {

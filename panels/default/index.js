@@ -5,8 +5,8 @@ const path = require('path');
 const PACKAGE_NAME = 'cocos-plugin-dev';
 const labels = {
     create: '创建插件', link: '添加开发引用', unlink: '解除开发引用', enable: '更新插件状态', sync: '同步运行时文件', package: '打包插件',
-    doctor: '检查环境', prepare: '准备 Windows 宿主', configure: '配置原生构建',
-    build: '编译 Windows 宿主', run: '启动游戏', 'build-run': '构建并运行', debug: '打开开发工作区',
+    doctor: '检查环境', 'doctor-android': '检查 Android NDK', prepare: '准备 Windows 宿主', configure: '配置原生构建',
+    build: '编译 Windows 宿主', 'build-android': '编译 Android 插件 (.a)', run: '启动游戏', 'build-run': '构建并运行', debug: '打开开发工作区',
     stop: '停止游戏', restart: '重启游戏',
 };
 
@@ -33,6 +33,8 @@ function settings(panel) {
     return {
         enginePath: query(panel, '#engine-path').value,
         creatorPath: query(panel, '#creator-path').value,
+        ndkPath: query(panel, '#ndk-path')?.value || '',
+        androidAbi: query(panel, '#android-abi')?.value || 'arm64-v8a',
         outputDir: query(panel, '#output-dir').value,
         buildType: query(panel, '#build-type').value,
         ide: query(panel, '#ide').value,
@@ -260,13 +262,17 @@ function renderPlugins(panel, plugins) {
         const operations = plugin.error ? [] : [
             ['enable', plugin.enabled ? '禁用' : '启用'], ['source', '打开源码'], ['sync', '同步'],
             ['package', '打包'], ['package', '打包二进制', { binary: true }],
+            ['package', '打包 Android .a', { binary: true, platform: 'android' }],
         ];
         if (plugin.sourceType === 'local') operations.push(['unlink', '解除引用']);
         for (const [action, title, operationInput = {}] of operations) {
             const button = textElement(document, 'button', title);
             button.type = 'button';
             button.dataset.op = action;
-            if (operationInput.binary) {
+            if (operationInput.binary && operationInput.platform === 'android') {
+                button.dataset.binaryAndroid = 'true';
+                button.title = '导出最近成功构建配置的 Android 预编译静态库 (.a) 插件包';
+            } else if (operationInput.binary) {
                 button.dataset.binary = 'true';
                 button.title = '导出最近成功构建配置的 Windows 二进制插件包';
             }
@@ -308,6 +314,8 @@ function applyContext(panel, context, restoreTask) {
     if (!panel._settingsLoaded || changedHost) {
         query(panel, '#engine-path').value = context.settings.enginePath || '';
         query(panel, '#creator-path').value = context.settings.creatorPath || '';
+        if (query(panel, '#ndk-path')) query(panel, '#ndk-path').value = context.settings.ndkPath || '';
+        if (query(panel, '#android-abi')) query(panel, '#android-abi').value = context.settings.androidAbi || 'arm64-v8a';
         query(panel, '#output-dir').value = context.settings.outputDir || '';
         query(panel, '#build-type').value = context.settings.buildType || 'Debug';
         query(panel, '#ide').value = context.settings.ide || 'vscode';

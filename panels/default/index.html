@@ -151,6 +151,8 @@
               <button type="button" data-action="restart" data-mutation>重启游戏</button>
               <button type="button" data-action="configure" data-mutation>重新配置</button>
               <button type="button" data-action="doctor" data-mutation>检查环境</button>
+              <button type="button" data-action="build-android" data-mutation title="使用本机 CMake + Ninja + Android NDK 独立交叉编译插件静态库 (.a)">编译 Android (.a)</button>
+              <button type="button" data-action="doctor-android" data-mutation title="检查本机 Android NDK 工具链与配置">检查 Android NDK</button>
             </div>
           </div>
           <div class="divider"></div>
@@ -162,6 +164,19 @@
           <label class="prop-row">
             <span class="prop-label">Creator 路径</span>
             <input id="creator-path" placeholder="留空自动检测；或填 CocosCreator.exe 路径" autocomplete="off" />
+          </label>
+          <label class="prop-row">
+            <span class="prop-label">Android NDK</span>
+            <input id="ndk-path" placeholder="留空自动检测；或填 NDK 根目录（含 build/cmake/android.toolchain.cmake）" autocomplete="off" />
+          </label>
+          <label class="prop-row">
+            <span class="prop-label">Android ABI</span>
+            <select id="android-abi">
+              <option value="arm64-v8a">arm64-v8a（默认 · 64 位 ARM）</option>
+              <option value="armeabi-v7a">armeabi-v7a（32 位 ARM）</option>
+              <option value="x86_64">x86_64（64 位模拟器）</option>
+              <option value="x86">x86（32 位模拟器）</option>
+            </select>
           </label>
           <label class="prop-row">
             <span class="prop-label">插件导出目录</span>

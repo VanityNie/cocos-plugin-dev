@@ -55,15 +55,16 @@ function readSettings(project) {
         }
     }
     const creator = /cocoscreator\.exe$/i.test(process.execPath) ? process.execPath : '';
-    return { enginePath: '', creatorPath: creator, outputDir: path.join(project, '.plugin-dev', 'packages'), buildType: 'Debug', ide: 'vscode', ...saved };
+    return { enginePath: '', creatorPath: creator, ndkPath: '', androidAbi: 'arm64-v8a', outputDir: path.join(project, '.plugin-dev', 'packages'), buildType: 'Debug', ide: 'vscode', ...saved };
 }
 
 function cleanSettings(values) {
     const result = {};
-    for (const key of ['enginePath', 'creatorPath', 'outputDir', 'buildType', 'ide']) {
+    for (const key of ['enginePath', 'creatorPath', 'ndkPath', 'androidAbi', 'outputDir', 'buildType', 'ide']) {
         if (typeof values[key] === 'string') result[key] = values[key].trim();
     }
     if (result.ide) result.ide = require('./lib/ide.cjs').normalizeIDE(result.ide);
+    if (result.androidAbi) result.androidAbi = android()._internal.normalizeAbi(result.androidAbi);
     return result;
 }
 
@@ -77,6 +78,7 @@ function writeSettings(project, values) {
 
 function core() { return require('./lib/core.cjs'); }
 function windows() { return require('./lib/windows.cjs'); }
+function android() { return require(path.join(__dirname, 'lib/android.cjs')); }
 function runLog() { return require(path.join(__dirname, 'lib/run-log.cjs')); }
 function support() { return require(path.join(__dirname, 'templates/common/editor/plugin-support.cjs')); }
 
@@ -299,8 +301,8 @@ async function openPath(file) {
     return resolved;
 }
 
-const ACTIONS = new Set(['create', 'link', 'unlink', 'enable', 'sync', 'package', 'doctor', 'prepare', 'configure', 'build', 'run', 'stop', 'restart', 'build-run', 'debug']);
-const CANCELLABLE_ACTIONS = new Set(['prepare', 'configure', 'build', 'build-run', 'debug']);
+const ACTIONS = new Set(['create', 'link', 'unlink', 'enable', 'sync', 'package', 'doctor', 'doctor-android', 'prepare', 'configure', 'build', 'build-android', 'run', 'stop', 'restart', 'build-run', 'debug']);
+const CANCELLABLE_ACTIONS = new Set(['prepare', 'configure', 'build', 'build-android', 'build-run', 'debug']);
 
 function requestCancellation(task) {
     if (task.status === 'cancelling') return;
@@ -329,9 +331,10 @@ function logResult(task, result) {
         append(task, `插件 ${result.name} 的运行时文件已同步。\n`);
         break;
     case 'package':
-        append(task, `${result.binary ? '二进制插件' : '源码插件'}已导出${result.buildType ? `（${result.buildType}）` : ''}。\nZIP：${result.zipPath}\n插件目录：${result.packagePath}\n`);
+        append(task, `${result.binary ? (result.platform === 'android' ? `Android (${result.abi}) 二进制插件` : '二进制插件') : '源码插件'}已导出${result.buildType ? `（${result.buildType}）` : ''}。\nZIP：${result.zipPath}\n插件目录：${result.packagePath}\n`);
         break;
     case 'doctor':
+    case 'doctor-android':
         for (const check of result.checks) append(task, `${check.ok ? '通过' : check.required ? '需要处理' : '提示'} · ${check.name}：${check.message}\n`);
         break;
     case 'prepare':
@@ -342,6 +345,12 @@ function logResult(task, result) {
         break;
     case 'build':
         append(task, `构建完成（${result.builtBuildType}）：${result.executable}\n`);
+        break;
+    case 'build-android':
+        append(task, `Android (${result.abi} · ${result.builtBuildType}) 插件静态库编译完成：${result.buildDir}\n`);
+        for (const [pluginName, artifactPath] of Object.entries(result.artifacts || {})) {
+            append(task, `产物 · ${pluginName}：${artifactPath}\n`);
+        }
         break;
     case 'debug':
         append(task, `开发工作区：${result.workspacePath}\n`);
@@ -402,7 +411,24 @@ async function execute(task, input, settings) {
             ...pluginOptions,
             binary: input.binary === true,
             buildType: input.buildType,
+            ...(input.platform ? { platform: input.platform } : {}),
+            ...(input.platform === 'android' ? { abi: input.abi || settings.androidAbi || 'arm64-v8a' } : {}),
             outputDir: settings.outputDir || path.join(task.projectPath, '.plugin-dev', 'packages'),
+        });
+        break;
+    case 'doctor-android':
+        result = await android().doctor({
+            ...options,
+            ...(settings.ndkPath ? { ndkPath: settings.ndkPath } : {}),
+            abi: input.abi || settings.androidAbi || 'arm64-v8a',
+        });
+        if (result.ok === false) task.outcome = 'attention';
+        break;
+    case 'build-android':
+        result = await android().build({
+            ...options,
+            ...(settings.ndkPath ? { ndkPath: settings.ndkPath } : {}),
+            abi: input.abi || settings.androidAbi || 'arm64-v8a',
         });
         break;
     case 'doctor':

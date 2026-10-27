@@ -66,6 +66,7 @@ flowchart LR
 | `lib/binary-package.cjs` | 根据成功构建记录与 CMake 元数据收集二进制发布内容，生成配置及 ABI 校验信息。 |
 | `lib/package-archive.cjs` | 通过成熟 ZIP 库流式写入发布归档。 |
 | `lib/windows.cjs` | 探测工具链、准备宿主、配置与构建 C++、生成调试工作区。 |
+| `lib/android.cjs` | 探测 Android NDK 工具链，生成独立 Android CMake 宿主入口并交叉编译插件静态库 `.a`。 |
 | `lib/run-log.cjs` | 按文件位置增量读取游戏日志，保存跨读取块的 UTF-8 字符并限制单次读取量。 |
 | `lib/dev-host.cjs` | 生成独立测试场景和启动组件，检查原生注册并自动运行插件探针。 |
 | `lib/ide.cjs` | 配置 VS Code 的 CMake Tools / clangd，选择匹配 Visual Studio 的 CMake 并生成独立 `.sln` / `.slnx`。 |

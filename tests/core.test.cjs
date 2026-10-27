@@ -39,7 +39,9 @@ test('creation wires official manifest, CMake, JSB and importable typed runtime'
     assert.equal(manifest.disabled, false);
     assert.equal(pkg.package_version, 2);
     assert.ok(fs.existsSync(path.join(plugin.pluginPath, pkg.main)));
+    assert.deepEqual(manifest.platforms, ['windows', 'android']);
     assert.ok(fs.existsSync(path.join(plugin.pluginPath, `native/windows/${plugin.target}-config.cmake`)));
+    assert.ok(fs.existsSync(path.join(plugin.pluginPath, `native/android/${plugin.target}-config.cmake`)));
     const ts = fs.readFileSync(path.join(plugin.runtimePath, 'index.ts'), 'utf8');
     assert.match(ts, /globalThis\.CpdNeuralRender_/);
     assert.doesNotMatch(ts, /\bany\b|\{\{[A-Z_]+\}\}/);
@@ -314,6 +316,8 @@ test('two hosts compile original sources and maintain independent enable and imp
     assert.equal(fs.readFileSync(path.join(pluginPath, 'native/cc_plugin.json'), 'utf8'), nativeBefore);
     const config = fs.readFileSync(path.join(created.extensionPath, `native/windows/${created.target}-config.cmake`), 'utf8');
     assert.ok(config.includes(path.join(pluginPath, `native/windows/${created.target}-config.cmake`).replace(/\\/g, '/')));
+    const androidConfig = fs.readFileSync(path.join(created.extensionPath, `native/android/${created.target}-config.cmake`), 'utf8');
+    assert.ok(androidConfig.includes(path.join(pluginPath, `native/android/${created.target}-config.cmake`).replace(/\\/g, '/')));
     assert.equal(fs.existsSync(path.join(created.extensionPath, 'native/src')), false);
     fs.appendFileSync(path.join(pluginPath, 'runtime/index.ts'), '\n// one source, two hosts\n');
     // The adapter ships its own sync implementation and needs no workbench at runtime.

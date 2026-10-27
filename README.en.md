@@ -11,6 +11,7 @@ Built on the official Cocos native plugin mechanism. A single plugin source tree
 - Windows x64, Cocos Creator 3.8.8 (Cocos 4.0 experimental support)
 - Node.js 18+
 - Visual Studio C++ Desktop Development workload, Windows SDK, CMake, Ninja
+- Optional: Android NDK (for standalone Windows-hosted Android `.a` cross-compilation and binary packaging)
 - Optional: VS Code (CMake Tools, C/C++ debugger, clangd), or the Visual Studio IDE
 
 The JS engine used by Creator and the C++ engine used for native builds must match. When using a custom engine, configure both in Creator Preferences and restart the editor.
@@ -58,7 +59,10 @@ node cli.cjs stop --project E:/games/MyGame
 node cli.cjs restart --project E:/games/MyGame
 node cli.cjs debug --project E:/games/MyGame --ide vscode
 node cli.cjs debug --project E:/games/MyGame --ide visual-studio
+node cli.cjs doctor --project E:/games/MyGame --platform android --abi arm64-v8a
+node cli.cjs build --project E:/games/MyGame --platform android --abi arm64-v8a
 node cli.cjs package --project E:/games/MyGame --name my-plugin --output-dir E:/exports
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform android --abi arm64-v8a --output-dir E:/exports
 node cli.cjs unlink --project E:/games/TestGame --name my-plugin
 ```
 

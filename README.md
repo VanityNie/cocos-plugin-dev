@@ -11,6 +11,7 @@ Cocos Creator 的 Windows 原生插件开发工作台。支持在独立目录或
 - Windows x64、Cocos Creator 3.8.8（Cocos 4.0 实验性支持）
 - Node.js 18+
 - Visual Studio C++ 桌面开发工具集、Windows SDK、CMake、Ninja
+- 可选：Android NDK（用于 Windows 本机交叉编译 Android 原生插件静态库 `.a` 与二进制导出）
 - 可选：VS Code（CMake Tools、C/C++ 调试扩展、clangd），或 Visual Studio IDE
 
 Creator 的 JS 引擎与原生构建的 C++ 引擎版本必须一致。若使用自定义引擎，需在 Creator 偏好设置中同时配置两者并重启编辑器。
@@ -58,7 +59,10 @@ node cli.cjs stop --project E:/games/MyGame
 node cli.cjs restart --project E:/games/MyGame
 node cli.cjs debug --project E:/games/MyGame --ide vscode
 node cli.cjs debug --project E:/games/MyGame --ide visual-studio
+node cli.cjs doctor --project E:/games/MyGame --platform android --abi arm64-v8a
+node cli.cjs build --project E:/games/MyGame --platform android --abi arm64-v8a
 node cli.cjs package --project E:/games/MyGame --name my-plugin --output-dir E:/exports
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform android --abi arm64-v8a --output-dir E:/exports
 node cli.cjs unlink --project E:/games/TestGame --name my-plugin
 ```
 
@@ -132,14 +136,25 @@ Visual Studio 解决方案负责原生 C++ 开发；TS 断点使用 VS Code 的 
 
 通过 `package` 导出的插件包内含当前源码快照、资源 UUID 种子及 `contributions.builder` 构建钩子。将导出的插件目录放入其他 Creator 项目的 `extensions/` 并启用后，直接使用 Creator 正常构建 Windows 平台即可自动完成 TS 同步、CMake 挂载与运行时 DLL／资源部署，目标项目无需安装本工作台。
 
-需要分发已编译的原生库时，点击面板的 **打包二进制**，或使用 `package --binary`：
+需要分发已编译的原生库时，点击面板的 **打包二进制** / **打包 Android .a**，或使用 `package --binary`：
 
 ```powershell
 node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --output-dir E:/exports
 node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --build-type RelWithDebInfo --output-dir E:/exports
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform android --abi arm64-v8a --output-dir E:/exports
 ```
 
-二进制打包缺省使用该宿主最近成功构建的配置。显式 `--build-type` 必须与已完成的构建匹配；源码修改后需要重新构建。`--binary` 仅用于 `package`，`package --build-type` 必须同时指定 `--binary`。界面保存的构建配置不会改变此次打包的选择。
+二进制打包缺省使用该宿主对应平台最近成功构建的配置。显式 `--build-type` 必须与已完成的构建匹配；源码修改后需要重新构建。`--binary` 仅用于 `package`，`package --build-type` 与 `package --platform android` 必须同时指定 `--binary`。界面保存的构建配置不会改变此次打包的选择。
+
+### Android 原生插件交叉编译与 `.a` 二进制打包
+
+生成的插件默认同时包含 `native/windows/<target>-config.cmake` 与 `native/android/<target>-config.cmake`，并在 `native/cc_plugin.json` 中声明 `"platforms": ["windows", "android"]`。
+
+在 Windows 本机无需安装 Android Studio / Gradle 或构建完整 APK，即可通过 CMake + Ninja + Android NDK 快速验证插件 C++ 源码在 Android NDK Clang 下的交叉编译兼容性，并导出预编译静态库 `.a` 二进制包：
+
+- **NDK 自动探测**：按 `--ndk-path` → 环境变量（`COCOS_PLUGIN_NDK`、`ANDROID_NDK_HOME`、`ANDROID_NDK_ROOT`）→ Creator 全局配置（`~/.CocosCreator/profiles/v2/packages/program.json`）→ 本机 `Android/Sdk/ndk/<version>` 顺序查找。
+- **独立交叉编译检查**：`build --platform android --abi arm64-v8a`（支持 `arm64-v8a`、`armeabi-v7a`、`x86_64`、`x86`）在 `.plugin-dev/build/android/<abi>` 下执行 SWIG 绑定头生成与插件静态库 `lib<target>.a` 编译，并生成对应的 `compile_commands.json`。
+- **Android 预编译包导出**：`package --binary --platform android --abi <abi>` 输出 `<name>-<version>-android-<abi>-<Config>.zip`，内含 `native/android/<abi>/lib/lib<target>.a`、公开头文件 `native/android/lib/include/`、`native/android/binary-manifest.json` 以及带 ABI/STL/引擎版本校验的 `native/android/<target>-config.cmake`。
 
 导出对象是 `plugin-dev.json.target` 对应的单个 `STATIC_LIBRARY`，`cc_plugin.json.modules` 必须仅包含这个 target。其第三方静态库、DLL import library 和公开编译设置会根据 CMake 的完整链接关系一同收集。
 

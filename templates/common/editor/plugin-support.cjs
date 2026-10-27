@@ -230,15 +230,21 @@ function adapterFiles(info, enabled) {
         files.set(`editor/${file}`, fs.readFileSync(path.join(__dirname, file), 'utf8').replace(/\{\{NAME\}\}/g, info.meta.name));
     }
     files.set('native/cc_plugin.json', `${JSON.stringify({ ...native, disabled: !enabled }, null, 2)}\n`);
+    const platforms = Array.isArray(native.platforms) && native.platforms.length ? native.platforms : ['windows'];
     for (const module of native.modules) {
         if (typeof module.target !== 'string' || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(module.target)) fail(`无效的原生模块 target: ${module.target}`);
-        const config = path.join(info.pluginPath, 'native', 'windows', `${module.target}-config.cmake`);
-        noLinks(info.pluginPath, config);
-        if (!fs.existsSync(config)) fail(`缺少 Windows 模块配置: ${config}`);
-        const normalized = config.replace(/\\/g, '/');
-        let delimiter = '=';
-        while (normalized.includes(`]${delimiter}]`)) delimiter += '=';
-        files.set(`native/windows/${module.target}-config.cmake`, `# Generated host reference; edit the independent plugin source.\ninclude([${delimiter}[${normalized}]${delimiter}])\n`);
+        for (const [platform, label] of [['windows', 'Windows'], ['android', 'Android']]) {
+            const config = path.join(info.pluginPath, 'native', platform, `${module.target}-config.cmake`);
+            noLinks(info.pluginPath, config);
+            if (!fs.existsSync(config)) {
+                if (platforms.includes(platform)) fail(`缺少 ${label} 模块配置: ${config}`);
+                continue;
+            }
+            const normalized = config.replace(/\\/g, '/');
+            let delimiter = '=';
+            while (normalized.includes(`]${delimiter}]`)) delimiter += '=';
+            files.set(`native/${platform}/${module.target}-config.cmake`, `# Generated host reference; edit the independent plugin source.\ninclude([${delimiter}[${normalized}]${delimiter}])\n`);
+        }
     }
     return new Map([...files].map(([rel, value]) => [rel, Buffer.isBuffer(value) ? value : Buffer.from(value)]));
 }
@@ -363,7 +369,7 @@ const FALLBACK_CC_DECLARATIONS = [
 function discoverHostEngine(project, explicitEnginePath) {
     if (explicitEnginePath) return explicitEnginePath;
     if (!project) return null;
-    for (const rel of ['.plugin-dev/windows.json', '.plugin-dev/ui-settings.json']) {
+    for (const rel of ['.plugin-dev/windows.json', '.plugin-dev/android.json', '.plugin-dev/ui-settings.json']) {
         const file = path.join(project, rel);
         if (!fs.existsSync(file)) continue;
         noLinks(project, file);

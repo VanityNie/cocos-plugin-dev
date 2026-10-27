@@ -34,9 +34,12 @@ Options:
   --creator-path <CocosCreator.exe>  Select Creator
   --engine-path <engine root>       Select native engine (must match built JS assets)
   --compiler msvc|clang-cl          Windows compiler
+  --platform windows|android        Target native platform for doctor/configure/build/package (default: windows)
+  --abi arm64-v8a|armeabi-v7a|x86_64|x86  Android ABI for --platform android (default: arm64-v8a)
+  --ndk-path <NDK root>             Android NDK root directory (containing build/cmake/android.toolchain.cmake)
   --ide vscode|visual-studio        IDE project format for debug (default: vscode)
   --build-type Debug|RelWithDebInfo|Release  构建配置；package --binary 缺省使用最近成功构建的配置
-  --binary                         导出已构建的 Windows 原生静态库，仅用于 package
+  --binary                         导出已构建的 Windows (.lib) 或 Android (.a) 原生静态库，仅用于 package
   --display-name <label>            Plugin display name
   --native-source-dir <directory>   Explicit generated Windows CMake source
   --resource-dir <directory>        Explicit Creator Windows build resources
@@ -52,7 +55,9 @@ function parseArgs(argv) {
         project: 'projectPath', name: 'name', template: 'template',
         'display-name': 'displayName', 'output-dir': 'outputDir',
         'creator-path': 'creatorPath', 'engine-path': 'enginePath',
-        compiler: 'compiler', ide: 'ide', 'build-type': 'buildType', 'native-source-dir': 'nativeSourceDir',
+        compiler: 'compiler', platform: 'platform', abi: 'abi', 'ndk-path': 'ndkPath',
+        'android-platform': 'androidPlatform', 'android-stl': 'androidStl',
+        ide: 'ide', 'build-type': 'buildType', 'native-source-dir': 'nativeSourceDir',
         'resource-dir': 'resourceDir',
         'plugin-path': 'pluginPath', 'source-path': 'sourcePath',
     };
@@ -71,11 +76,38 @@ function parseArgs(argv) {
         if (options[key] !== undefined) throw new Error(`Duplicate argument: ${flag}`);
         options[key] = rest[++i];
     }
-    for (const key of ['projectPath', 'pluginPath', 'sourcePath']) {
+    for (const key of ['projectPath', 'pluginPath', 'sourcePath', 'ndkPath']) {
         if (options[key]) options[key] = path.resolve(options[key]);
+    }
+    if (options.platform !== undefined) {
+        if (!['doctor', 'configure', 'build', 'package'].includes(command)) {
+            throw new Error('--platform is only available for doctor, configure, build, and package.');
+        }
+        const normalizedPlatform = String(options.platform).trim().toLowerCase();
+        if (!['windows', 'android'].includes(normalizedPlatform)) {
+            throw new Error(`Unsupported platform: ${options.platform}. Use windows or android.`);
+        }
+        options.platform = normalizedPlatform;
+    }
+    if (options.abi !== undefined) {
+        if (!['doctor', 'configure', 'build', 'package'].includes(command)) {
+            throw new Error('--abi is only available for doctor, configure, build, and package.');
+        }
+        if (options.platform !== 'android') {
+            throw new Error('--abi requires --platform android.');
+        }
+        options.abi = require(path.join(__dirname, 'lib/android.cjs'))._internal.normalizeAbi(options.abi);
+    }
+    if (options.ndkPath !== undefined || options.androidPlatform !== undefined || options.androidStl !== undefined) {
+        if (!['doctor', 'configure', 'build'].includes(command) || options.platform !== 'android') {
+            throw new Error('--ndk-path, --android-platform, and --android-stl require doctor/configure/build with --platform android.');
+        }
     }
     if (command === 'package' && options.buildType !== undefined && options.binary !== true) {
         throw new Error('package 使用 --build-type 时必须同时指定 --binary。');
+    }
+    if (command === 'package' && options.platform !== undefined && options.binary !== true && options.platform !== 'windows') {
+        throw new Error('package 使用 --platform android 时必须同时指定 --binary。');
     }
     if (options.ide !== undefined) {
         if (command !== 'debug') throw new Error('--ide is only available for debug.');
@@ -132,7 +164,11 @@ async function main(argv, { signal } = {}) {
     if (command === 'package') {
         input.binary = options.binary === true;
         delete input.buildType;
+        delete input.platform;
+        delete input.abi;
         if (options.buildType !== undefined) input.buildType = options.buildType;
+        if (options.platform !== undefined) input.platform = options.platform;
+        if (options.abi !== undefined) input.abi = options.abi;
     }
     let result;
     if (command === 'sandbox') result = createSandbox(input);
@@ -146,6 +182,11 @@ async function main(argv, { signal } = {}) {
         else if (command === 'enable' || command === 'disable') result = await core.setEnabled({ ...input, enabled: command === 'enable' });
         else if (command === 'sync') result = await core.syncPlugin(input);
         else result = await core.packagePlugin(input);
+    } else if (options.platform === 'android') {
+        const android = require('./lib/android.cjs');
+        const method = { doctor: 'doctor', configure: 'configure', build: 'build' }[command];
+        if (!method) throw new Error(`Command ${command} is not supported for --platform android.`);
+        result = await android[method]({ ...input, abi: options.abi || settings.androidAbi });
     } else {
         const windows = require('./lib/windows.cjs');
         const method = { doctor: 'doctor', prepare: 'prepareHost', configure: 'configure', build: 'build', run: 'run', stop: 'stop', restart: 'restart', debug: 'debugWorkspace' }[command];
