@@ -38,12 +38,14 @@ test('发布包及独立插件适配目录包含完整构建入口，并独立�
     const descriptorPath = path.join(plugin.pluginPath, 'plugin-dev.json');
     f.put(descriptorPath, { ...support.readJson(descriptorPath), runtimeFiles: [{ source: 'resources/settings.json', target: 'config/settings.json' }] });
     const packaged = await core.packagePlugin({ projectPath: project, name: plugin.name });
-    const helpers = ['plugin-support.cjs', 'builder.js', 'build-hooks.cjs', 'runtime-deployment.cjs', 'runtime-build.cmake', 'deploy-runtime.cjs', 'windows-build.cjs', 'windows-build.cmake', 'typescript-plugin.cjs'];
+    const helpers = ['plugin-support.cjs', 'builder.js', 'build-hooks.cjs', 'runtime-deployment.cjs', 'android-build.cjs', 'runtime-build.cmake', 'deploy-runtime.cjs', 'windows-build.cjs', 'windows-build.cmake', 'typescript-plugin.cjs'];
     for (const directory of [plugin.extensionPath, packaged.packagePath]) {
         const pkg = support.readJson(path.join(directory, 'package.json'));
         assert.equal(pkg.contributions.builder, './editor/builder.js');
         const builder = require(path.join(directory, pkg.contributions.builder));
-        const hooks = require(path.join(directory, 'editor', builder.configs.windows.hooks));
+        assert.equal(builder.configs.windows.hooks, './build-hooks.cjs');
+        assert.equal(builder.configs.android.hooks, './build-hooks.cjs');
+        const hooks = require(path.join(directory, 'editor', builder.configs.android.hooks));
         for (const name of ['onBeforeBuild', 'onAfterCompressSettings', 'onAfterBuild', 'onBeforeMake', 'onAfterMake']) assert.equal(typeof hooks[name], 'function');
         for (const file of helpers) {
             const source = fs.readFileSync(path.join(directory, 'editor', file), 'utf8');
@@ -63,6 +65,13 @@ test('发布包及独立插件适配目录包含完整构建入口，并独立�
     const deployment = require(path.join(installation, '.plugin-dev/native-build/runtime-deployment.cjs'));
     assert.equal(deployment.deployRuntimeFiles(installation, executable).deployed, 1);
     assert.deepEqual(support.readJson(path.join(path.dirname(executable), 'config/settings.json')), settings);
+    const nativeAndroidDir = path.join(installation, 'native/engine/android');
+    f.put(path.join(nativeAndroidDir, 'CMakeLists.txt'), 'cmake_minimum_required(VERSION 3.22)\n');
+    const assetsDataDir = path.join(installation, 'build/android/data');
+    fs.mkdirSync(assetsDataDir, { recursive: true });
+    const { deployAndroidBuildFiles } = require(path.join(destination, 'editor/android-build.cjs'));
+    assert.equal(deployAndroidBuildFiles(installation, { nativeAndroidDir, assetsDataDir }).assets.deployed, 1);
+    assert.deepEqual(support.readJson(path.join(assetsDataDir, 'config/settings.json')), settings);
     assert.equal(fs.existsSync(path.join(packaged.packagePath, '.local')), false);
 });
 

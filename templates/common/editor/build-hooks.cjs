@@ -5,6 +5,7 @@ const path = require('node:path');
 const support = require('./plugin-support.cjs');
 const { ensureWindowsBuildHook } = require('./windows-build.cjs');
 const { deployRuntimeFiles } = require('./runtime-deployment.cjs');
+const { deployAndroidBuildFiles, _internal: { requireDirectory, resolveNativeAndroidDirectory } } = require('./android-build.cjs');
 
 const name = '{{NAME}}';
 exports.throwError = true;
@@ -50,23 +51,41 @@ function builtExecutable(project, root, options) {
     return unique[0];
 }
 
-exports.onBeforeBuild = async function () {
+function resolveHookPlatform(firstArg, secondArg) {
+    const firstPlatform = typeof firstArg === 'object' ? firstArg?.platform : undefined;
+    return (firstPlatform ?? secondArg?.platform) === 'android' ? 'android' : 'windows';
+}
+function resolveAndroidBuildInputs(project, root, options) {
+    const nativeAndroidDir = resolveNativeAndroidDirectory(path.join(project, 'native/engine/android'));
+    const buildRoot = requireDirectory(root, 'Android 构建根目录');
+    const assetsDataDir = requireDirectory(path.join(buildRoot, 'data'), 'Android 构建资源 data 目录');
+    const appABIs = options?.packages?.android?.appABIs;
+    support.validateAndroidAbis(appABIs);
+    const abis = appABIs?.length ? appABIs : undefined;
+    const buildType = options?.debug ? 'Debug' : 'Release';
+    return { nativeAndroidDir, assetsDataDir, abis, buildType };
+}
+
+exports.onBeforeBuild = async function (options, result) {
     const project = projectPath();
-    const result = support.syncPlugin({ projectPath: project, name });
-    if (result.copied || result.removed) await Editor.Message.request('asset-db', 'refresh-asset', result.assetUrl);
-    ensureHook(project, false);
+    const sync = support.syncPlugin({ projectPath: project, name });
+    if (sync.copied || sync.removed) await Editor.Message.request('asset-db', 'refresh-asset', sync.assetUrl);
+    if (resolveHookPlatform(options, result) === 'windows') ensureHook(project, false);
 };
-exports.onAfterBuild = function () {
-    ensureHook(projectPath(), true);
+exports.onAfterBuild = function (options, result) {
+    if (resolveHookPlatform(options, result) === 'windows') ensureHook(projectPath(), true);
 };
-exports.onAfterCompressSettings = function () {
-    ensureHook(projectPath(), true);
+exports.onAfterCompressSettings = function (options, result) {
+    if (resolveHookPlatform(options, result) === 'windows') ensureHook(projectPath(), true);
 };
-exports.onBeforeMake = function () {
-    ensureHook(projectPath(), true);
+exports.onBeforeMake = function (root, options) {
+    const project = projectPath();
+    if (resolveHookPlatform(root, options) === 'android') return deployAndroidBuildFiles(project, resolveAndroidBuildInputs(project, root, options));
+    ensureHook(project, true);
 };
 exports.onAfterMake = function (root, options) {
+    if (resolveHookPlatform(root, options) === 'android') return;
     const project = projectPath();
     return deployRuntimeFiles(project, builtExecutable(project, root, options));
 };
-exports._internal = { builtExecutable };
+exports._internal = { builtExecutable, resolveHookPlatform, resolveAndroidBuildInputs };

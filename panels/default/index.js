@@ -263,13 +263,17 @@ function renderPlugins(panel, plugins) {
             ['enable', plugin.enabled ? '禁用' : '启用'], ['source', '打开源码'], ['sync', '同步'],
             ['package', '打包'], ['package', '打包二进制', { binary: true }],
             ['package', '打包 Android .a', { binary: true, platform: 'android' }],
+            ['package', '打包通用二进制', { binary: true, platform: 'all', buildType: 'all', abi: 'all' }],
         ];
         if (plugin.sourceType === 'local') operations.push(['unlink', '解除引用']);
         for (const [action, title, operationInput = {}] of operations) {
             const button = textElement(document, 'button', title);
             button.type = 'button';
             button.dataset.op = action;
-            if (operationInput.binary && operationInput.platform === 'android') {
+            if (operationInput.platform === 'all') {
+                button.dataset.binaryUniversal = 'true';
+                button.title = '导出 Windows 和 Android 已构建的配置与 ABI';
+            } else if (operationInput.binary && operationInput.platform === 'android') {
                 button.dataset.binaryAndroid = 'true';
                 button.title = '导出最近成功构建配置的 Android 预编译静态库 (.a) 插件包';
             } else if (operationInput.binary) {

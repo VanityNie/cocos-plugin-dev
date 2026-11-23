@@ -118,15 +118,19 @@ VS Code 从源文件所在目录向上查找 tsconfig。工作台的 TypeScript 
 
 `runtime-build.cmake` 在 Creator 完成依赖复制后，为可执行目标注册 `POST_BUILD`，并建立 `cpd_runtime_deploy` 默认构建目标。CMake 通过 `file(GENERATE)` 写入实际配置和可执行文件路径，供构建 hooks 使用。最后一个插件禁用或解除引用后，宿主公共支持继续执行资源清理。
 
+Android 的 `onBeforeMake` 从 `packages.android.appABIs` 获取目标 ABI，并根据 `debug` 选择构建配置。部署入口校验 Android 二进制清单的 SHA-256，将动态库部署到宿主 `native/engine/android/libs/<abi>/`，将运行资源部署到本次构建目录的 `data/`，再清理当前部署目标中已解除引用的受管文件。
+
 ## 二进制发布
 
-`core.packagePlugin({ binary: true })` 根据宿主最近成功的构建记录选择配置；显式 `buildType` 必须匹配已有构建。检查成功记录、源码指纹和实际产物后，根据 CMake 元数据收集插件静态库及其链接依赖。导出使用单配置 Windows x64 包，输出名称包含平台、架构和配置。
+`core.packagePlugin({ binary: true })` 根据所选平台最近成功的构建记录选择配置，显式 `buildType` 必须匹配已有构建。检查成功记录、源码指纹和产物后，根据 CMake 元数据收集插件静态库及其链接依赖。单配置包名包含平台、Windows 架构或 Android ABI，以及构建配置。
+
+`platform`、`buildType` 或 `abi` 接收 `all`、列表字符串或数组时，打包读取 `.plugin-dev/binary-slots/` 中按平台、ABI 和配置保留的构建记录。各平台的 CMake 配置根据构建类型及 Android ABI 选择静态库和链接依赖，`plugin-dev.json` 的 `distribution` 记录包内平台、配置和 ABI。Windows 和 Android 同时入包时使用 `-universal-binary.zip` 后缀。两平台共用的同路径、同内容运行资源在 `native/runtime/` 中保存一份。Windows 专用文件保存在 `native/windows/lib/runtime/`，Android 专用资源保存在 `native/runtime/` 并附带平台声明。
 
 发布配置通过 CMake imported targets 引用 `native/windows/lib` 中的静态库，并验证目标配置、引擎与 C++ ABI。`native/windows/binary-manifest.json` 保存构建版本、ABI 及文件记录。公共头文件分别从 `native/include`、`native/windows/include`、`native/third_party/include` 收集到 `native/windows/lib/include` 的对应目录；`native/src` 保留在开发源码中。
 
 使用 `/Zi` 或 `/ZI` 编译的静态库通过 CMake 编译目标记录取得 compiler PDB。发布时按照原文件名将 PDB 与对应库保存在同一目录，并记录文件指纹，使 `Debug`、`RelWithDebInfo` 的消费项目能够链接完整调试符号。`/Z7` 将调试信息保存在库内。PDB 的源码行号不包含 C++ 实现文件，源码调试仍需另行提供匹配源码。
 
-运行 DLL、模型和显式资源保存到 `native/windows/lib/runtime/<target>`，`runtimeFiles` 改为引用这些包内文件并保留部署目标。TS 运行代码、编辑器入口和构建 hooks 与二进制库一同分发，目标项目完成游戏链接后执行相同的运行资源部署规则。
+`runtimeFiles` 引用包内文件并保留部署目标。TS 运行代码、编辑器入口和构建 hooks 与二进制库一同分发。
 
 `packagePlugin` 返回 Promise，ZIP 写入结束后返回结果。归档通过流式 I/O 处理，构建与资源校验失败时终止导出。CLI 将 `--binary` 和显式 `--build-type` 传入打包入口，缺省配置由成功构建记录决定。
 

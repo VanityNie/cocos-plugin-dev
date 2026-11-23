@@ -14,6 +14,17 @@ const support = require('../templates/common/editor/plugin-support.cjs');
 const internal = android._internal;
 const binaryInternal = binaryArtifacts._internal;
 
+test('单配置 Android CMake 使用 GNU ld 链接选项包围整个静态库', () => {
+    const config = binaryInternal.importedAndroidCmake({
+        target: 'cpd_plugin', abi: 'x86_64', buildType: 'Release', engineVersion: '3.8.8',
+        toolchain: { compilerId: 'Clang' },
+        snapshot: { compileOptions: [], compileDefinitions: [] },
+        artifact: 'lib/libcpd_plugin.a', options: [], includeDirectories: [],
+        linkItems: [{ prefix: 'WHOLE_ARCHIVE:', relative: 'lib/dependencies/libcpd_whole_dep.a' }],
+    });
+    assert.match(config, /-Wl,--whole-archive "\$\{CMAKE_CURRENT_LIST_DIR\}\/lib\/dependencies\/libcpd_whole_dep\.a" -Wl,--no-whole-archive/);
+});
+
 function fixture(t) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cocos-plugin-android-test-'));
     t.after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -296,7 +307,7 @@ test('真实 Android NDK 交叉编译插件静态库 (.a) 并导出预编译二�
     assert.match(exportedConfig, /if\(NOT ANDROID\)/);
     assert.match(exportedConfig, /if\(NOT ANDROID_ABI STREQUAL "arm64-v8a"\)/);
     assert.match(exportedConfig, new RegExp(`add_library\\(${created.target} STATIC IMPORTED GLOBAL\\)`));
-    assert.match(exportedConfig, /\$<LINK_LIBRARY:WHOLE_ARCHIVE,[^"]*libcpd_whole_dep\.a>/);
+    assert.match(exportedConfig, /-Wl,--whole-archive "[^"]*libcpd_whole_dep\.a" -Wl,--no-whole-archive/);
 
     // Install the exported Android binary package into an independent consumer project
     // AND create a new source plugin in the same project to verify mixed binary + source build!

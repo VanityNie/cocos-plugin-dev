@@ -4,6 +4,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { binaryPackageSelection, isMultiBinarySelection } = require(path.join(__dirname, 'lib/binary-artifacts.cjs'));
 
 const HELP = `Cocos Plugin Dev — Windows
 
@@ -38,11 +39,15 @@ Options:
   --abi arm64-v8a|armeabi-v7a|x86_64|x86  Android ABI for --platform android (default: arm64-v8a)
   --ndk-path <NDK root>             Android NDK root directory (containing build/cmake/android.toolchain.cmake)
   --ide vscode|visual-studio        IDE project format for debug (default: vscode)
-  --build-type Debug|RelWithDebInfo|Release  构建配置；package --binary 缺省使用最近成功构建的配置
-  --binary                         导出已构建的 Windows (.lib) 或 Android (.a) 原生静态库，仅用于 package
+  --build-type Debug|RelWithDebInfo|Release  Build configuration
+  --binary                         Export built Windows (.lib) or Android (.a) libraries with package
   --display-name <label>            Plugin display name
   --native-source-dir <directory>   Explicit generated Windows CMake source
   --resource-dir <directory>        Explicit Creator Windows build resources
+
+With package --binary, --platform, --build-type, and --abi accept all or
+comma-separated lists. --abi requires Android in the platform selection.
+Single-slot packaging defaults to the latest successful build configuration.
 
 JSON results go to stdout; progress goes to stderr. Existing project content is
 never replaced by sandbox creation. Use Creator's plugin panel for the GUI flow.
@@ -79,24 +84,26 @@ function parseArgs(argv) {
     for (const key of ['projectPath', 'pluginPath', 'sourcePath', 'ndkPath']) {
         if (options[key]) options[key] = path.resolve(options[key]);
     }
+    const binaryPackage = command === 'package' && options.binary === true;
     if (options.platform !== undefined) {
         if (!['doctor', 'configure', 'build', 'package'].includes(command)) {
             throw new Error('--platform is only available for doctor, configure, build, and package.');
         }
         const normalizedPlatform = String(options.platform).trim().toLowerCase();
-        if (!['windows', 'android'].includes(normalizedPlatform)) {
+        if (!['windows', 'android'].includes(normalizedPlatform) && !(binaryPackage && isMultiBinarySelection(normalizedPlatform))) {
             throw new Error(`Unsupported platform: ${options.platform}. Use windows or android.`);
         }
         options.platform = normalizedPlatform;
     }
+    const selection = binaryPackage ? binaryPackageSelection(options) : undefined;
     if (options.abi !== undefined) {
         if (!['doctor', 'configure', 'build', 'package'].includes(command)) {
             throw new Error('--abi is only available for doctor, configure, build, and package.');
         }
-        if (options.platform !== 'android') {
+        if (!selection && options.platform !== 'android') {
             throw new Error('--abi requires --platform android.');
         }
-        options.abi = require(path.join(__dirname, 'lib/android.cjs'))._internal.normalizeAbi(options.abi);
+        if (!selection) options.abi = require(path.join(__dirname, 'lib/android.cjs'))._internal.normalizeAbi(options.abi);
     }
     if (options.ndkPath !== undefined || options.androidPlatform !== undefined || options.androidStl !== undefined) {
         if (!['doctor', 'configure', 'build'].includes(command) || options.platform !== 'android') {
@@ -105,6 +112,9 @@ function parseArgs(argv) {
     }
     if (command === 'package' && options.buildType !== undefined && options.binary !== true) {
         throw new Error('package 使用 --build-type 时必须同时指定 --binary。');
+    }
+    if (!binaryPackage && isMultiBinarySelection(options.buildType)) {
+        throw new Error('--build-type accepts all or a list only with package --binary.');
     }
     if (command === 'package' && options.platform !== undefined && options.binary !== true && options.platform !== 'windows') {
         throw new Error('package 使用 --platform android 时必须同时指定 --binary。');

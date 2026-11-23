@@ -49,6 +49,32 @@ test('package 的 binary 布尔参数保留显式构建配置', () => {
     assert.equal(parseArgs(['package', '--project', '.', '--name', 'sample']).options.binary, undefined);
 });
 
+test('package --binary 接受通用选择及平台、配置和 ABI 列表', () => {
+    for (const [platform, buildType, abi] of [
+        ['all', 'all', 'all'],
+        ['windows,android', 'Debug,Release', 'arm64-v8a,x86_64'],
+        ['android', 'Release', 'arm64-v8a,x86_64'],
+    ]) {
+        const { options } = parseArgs(['package', '--platform', platform, '--build-type', buildType, '--abi', abi, '--binary']);
+        assert.deepEqual(options, { binary: true, platform, buildType, abi });
+    }
+    assert.deepEqual(parseArgs(['package', '--binary', '--build-type', 'all']).options, { binary: true, buildType: 'all' });
+    for (const [args, error] of [
+        [['build', '--platform', 'all'], /Unsupported platform/],
+        [['doctor', '--platform', 'windows,android'], /Unsupported platform/],
+        [['configure', '--build-type', 'Debug,Release'], /--build-type/],
+        [['build', '--platform', 'android', '--abi', 'all'], /Unsupported Android ABI/],
+        [['package', '--platform', 'all'], /Unsupported platform/],
+        [['package', '--platform', 'windows,android'], /Unsupported platform/],
+        [['package', '--binary', '--platform', 'windows,linux'], /platforms/],
+        [['package', '--binary', '--build-type', 'Debug,Shipping'], /buildTypes/],
+        [['package', '--binary', '--abi', 'all'], /--abi/],
+        [['package', '--binary', '--platform', 'android', '--abi', 'arm64-v8a,mips'], /abis/],
+    ]) {
+        assert.throws(() => parseArgs(args), error);
+    }
+});
+
 test('真实 CLI 拒绝重复、带值和其他命令的 binary 参数', () => {
     for (const args of [
         ['package', '--binary', '--binary'],

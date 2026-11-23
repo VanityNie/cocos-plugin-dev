@@ -412,7 +412,7 @@ async function execute(task, input, settings) {
             binary: input.binary === true,
             buildType: input.buildType,
             ...(input.platform ? { platform: input.platform } : {}),
-            ...(input.platform === 'android' ? { abi: input.abi || settings.androidAbi || 'arm64-v8a' } : {}),
+            abi: input.abi || (input.platform === 'android' ? settings.androidAbi || 'arm64-v8a' : undefined),
             outputDir: settings.outputDir || path.join(task.projectPath, '.plugin-dev', 'packages'),
         });
         break;

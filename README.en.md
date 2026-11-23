@@ -147,7 +147,7 @@ node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --outpu
 node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --build-type RelWithDebInfo --output-dir E:/exports
 ```
 
-- Defaults to the host's most recent successful build configuration. An explicit `--build-type` must match the completed build; rebuild first if sources changed. `--binary` applies only to `package`, and `package --build-type` requires `--binary`.
+- For single-slot packaging, the default is the host's most recent successful build configuration. An explicit `--build-type` must match the completed build. Rebuild if sources changed. `--binary` applies only to `package`, and `package --build-type` requires `--binary`.
 - Exports the single `STATIC_LIBRARY` target specified by `plugin-dev.json.target` (`cc_plugin.json.modules` must contain only this target), along with its linked third-party static libraries, DLL import libraries, and public compile settings resolved by CMake.
 - Produces `<name>-<version>-windows-x64-<Config>.zip` per configuration:
   - Static libraries and link dependencies: `native/windows/lib/`
@@ -156,6 +156,19 @@ node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --build
   - Build & ABI metadata: `native/windows/binary-manifest.json` and `BINARY.md` (`native/src/` is excluded).
 - For `Debug` and `RelWithDebInfo` libraries compiled with `/Zi` or `/ZI`, the compiler PDB is placed next to its corresponding `.lib` so consumer projects link full debug symbols (`/Z7` embeds symbols directly inside the `.lib`).
 - Consumer projects link the package via the generated CMake config, which verifies build configuration, engine version, compiler toolset, and MSVC runtime ABI at build time.
+
+### Universal and Multi-Configuration Binary Packages
+
+Use **打包通用二进制** in the Creator panel or select platforms, build configurations, and Android ABIs with `package --binary`. Each selector accepts `all` or a comma-separated list. In multi-slot mode, an omitted platform defaults to Windows. An omitted configuration or ABI includes available builds for the selected platforms. An explicit ABI requires Android in the platform selection.
+
+```powershell
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform all --build-type all --abi all
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform android --build-type Debug,Release --abi arm64-v8a,x86_64
+```
+
+A package containing both Windows and Android is named `<name>-<version>-universal-binary.zip`. See `BINARY.md` in the ZIP for the included platforms, ABIs, and configurations.
+
+On Android, Creator's `onBeforeMake` hook deploys plugin `.so` files for the selected ABIs and configuration into the host's `native/engine/android/libs/<abi>/`. It deploys Android-compatible `runtimeFiles` assets to the build's `data/` directory and removes managed files that the build no longer uses after an ABI change or plugin disablement.
 
 ## Repository Development
 

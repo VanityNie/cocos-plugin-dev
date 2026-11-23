@@ -7,6 +7,7 @@ const path = require('node:path');
 const windows = require('../lib/windows.cjs');
 const support = require('../templates/common/editor/plugin-support.cjs');
 const binary = require('../lib/binary-artifacts.cjs');
+const { prepareBinaryPackage } = require('../lib/binary-package.cjs');
 
 for (const buildType of ['Debug', 'RelWithDebInfo', 'Release']) test(`真实 CMake ${buildType} 编译导出静态依赖、DLL、WHOLEARCHIVE 与公开编译设置，并在独立目录消费`, { skip: process.env.COCOS_PLUGIN_NATIVE_TESTS !== '1', timeout: 120000 }, async t => {
     const parent = path.resolve(__dirname, '../.local');
@@ -31,6 +32,14 @@ for (const buildType of ['Debug', 'RelWithDebInfo', 'Release']) test(`真实 CMa
     await internal.execute(report.tools.cmake, ['-S', source, '-B', state.buildDir, ...cmakeArgs,
         `-DBINARY_METADATA_MODULE=${path.resolve(__dirname, '../lib/cmake/binary-build.cmake')}`, `-DEXPORT_IPO=${buildType === 'Release' ? 'ON' : 'OFF'}`], { env });
     await internal.execute(report.tools.cmake, ['--build', state.buildDir], { env });
+    const metadata = { schemaVersion: 1, managedBy: support.OWNER, name: 'example', enabled: true, target: 'binary_plugin',
+        runtimeFiles: [{ source: 'settings.json', target: 'models/settings.json' }] };
+    support.writeJson(path.join(source, 'plugin-dev.json'), metadata);
+    support.writeJson(path.join(source, 'native/cc_plugin.json'), { modules: [{ target: metadata.target }] });
+    support.writeJson(path.join(source, 'settings.json'), { value: 7 });
+    const legacy = path.join(source, 'native/third_party/bin/legacy.dll');
+    fs.mkdirSync(path.dirname(legacy), { recursive: true });
+    fs.copyFileSync(path.join(state.buildDir, 'binary_math.dll'), legacy);
     state.builtAt = new Date().toISOString();
     const records = { example: { enabled: true, detached: false, target: 'binary_plugin', sourcePath: source, nativeFingerprint: support.nativeFingerprint(source) } };
     support.writeJson(path.join(source, '.plugin-dev/state.json'), { schemaVersion: 1, plugins: records });
@@ -45,6 +54,13 @@ for (const buildType of ['Debug', 'RelWithDebInfo', 'Release']) test(`真实 CMa
     assert.equal(artifacts.files.some(file => path.basename(file.source) === 'binary_external.lib'), true);
     assert.deepEqual(artifacts.manifest.compileDefinitions.sort(), ['CPD_ESCAPED="a\\\\b"', 'CPD_PUBLIC_VALUE=7', 'FOO=1']);
     assert.equal(artifacts.runtimeFiles.length, 1);
+    const info = support.sourceInfo(source);
+    const packaged = prepareBinaryPackage({ projectPath: source, info: { ...info, sourceMeta: info.meta } });
+    assert.deepEqual(JSON.parse(packaged.entries.get('plugin-dev.json')).runtimeFiles, [
+        { source: 'native/windows/lib/runtime/legacy.dll', target: 'legacy.dll', platform: 'windows' },
+        { source: 'native/runtime/models/settings.json', target: 'models/settings.json' },
+        { source: 'native/windows/lib/runtime/binary_math.dll', target: 'binary_math.dll', platform: 'windows' },
+    ]);
     assert.equal(binary.readBinaryArtifacts({ projectPath: source, name: 'example', buildType: buildType.toLowerCase() }).buildType, buildType);
     assert.throws(() => binary.readBinaryArtifacts({ projectPath: source, name: 'example', buildType: 'Shipping' }), /buildType/);
     assert.ok(artifacts.cmake.includes('/WHOLEARCHIVE:'));

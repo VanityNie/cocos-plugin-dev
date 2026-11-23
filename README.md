@@ -144,7 +144,18 @@ node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --build
 node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform android --abi arm64-v8a --output-dir E:/exports
 ```
 
-二进制打包缺省使用该宿主对应平台最近成功构建的配置。显式 `--build-type` 必须与已完成的构建匹配；源码修改后需要重新构建。`--binary` 仅用于 `package`，`package --build-type` 与 `package --platform android` 必须同时指定 `--binary`。界面保存的构建配置不会改变此次打包的选择。
+单配置打包缺省使用该宿主对应平台最近成功构建的配置。显式 `--build-type` 必须与已完成的构建匹配，源码修改后需要重新构建。`--binary` 仅用于 `package`，`package --build-type` 与 `package --platform android` 必须同时指定 `--binary`。打包使用命令或按钮指定的配置。
+
+### 通用二进制与多配置打包
+
+面板的 **打包通用二进制** 收集 Windows 和 Android 已构建的配置与 ABI。两个平台都包含在包中时，ZIP 文件名为 `<name>-<version>-universal-binary.zip`。包内 `BINARY.md` 列出可用平台、ABI 和构建配置。
+
+```powershell
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform all --build-type all --abi all
+node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platform android --build-type Debug,Release --abi arm64-v8a,x86_64
+```
+
+`package --binary` 的 `--platform`、`--build-type` 和 `--abi` 支持 `all` 或逗号分隔的列表。启用多配置打包后，省略平台时选择 Windows，省略配置或 ABI 时收集所选平台现有的构建记录。指定 ABI 时，平台选择须包含 Android。
 
 ### Android 原生插件交叉编译与 `.a` 二进制打包
 
@@ -156,9 +167,11 @@ node cli.cjs package --project E:/games/MyGame --name my-plugin --binary --platf
 - **独立交叉编译检查**：`build --platform android --abi arm64-v8a`（支持 `arm64-v8a`、`armeabi-v7a`、`x86_64`、`x86`）在 `.plugin-dev/build/android/<abi>` 下执行 SWIG 绑定头生成与插件静态库 `lib<target>.a` 编译，并生成对应的 `compile_commands.json`。
 - **Android 预编译包导出**：`package --binary --platform android --abi <abi>` 输出 `<name>-<version>-android-<abi>-<Config>.zip`，内含 `native/android/<abi>/lib/lib<target>.a`、公开头文件 `native/android/lib/include/`、`native/android/binary-manifest.json` 以及带 ABI/STL/引擎版本校验的 `native/android/<target>-config.cmake`。
 
+Creator 的 Android `onBeforeMake` 根据本次构建的 ABI 和配置，将插件的 `.so` 部署到宿主 `native/engine/android/libs/<abi>/`，将适用于 Android 的 `runtimeFiles` 资源部署到构建目录的 `data/`。切换 ABI 或禁用插件时，部署入口会清理本次构建目录内不再使用的受管文件。
+
 导出对象是 `plugin-dev.json.target` 对应的单个 `STATIC_LIBRARY`，`cc_plugin.json.modules` 必须仅包含这个 target。其第三方静态库、DLL import library 和公开编译设置会根据 CMake 的完整链接关系一同收集。
 
-输出名称为 `<name>-<version>-windows-x64-<Config>.zip`，每个包包含一种构建配置。原生静态库及链接依赖位于 `native/windows/lib/`，公共头文件位于其 `include/{plugin,windows,third_party}/`，运行 DLL 和模型位于其 `runtime/`；`native/src/` 保留在开发源码中。TS 运行代码、编辑器入口与构建 hooks 随包分发。`native/windows/binary-manifest.json` 记录构建版本、ABI 和文件信息，安装说明见包内 `BINARY.md`。
+Windows 单配置包名为 `<name>-<version>-windows-x64-<Config>.zip`。原生静态库及链接依赖位于 `native/windows/lib/`，公共头文件位于其 `include/{plugin,windows,third_party}/`，Windows 专用运行资源位于其 `runtime/`。TS 运行代码、编辑器入口与构建 hooks 随包分发。`native/windows/binary-manifest.json` 记录构建版本、ABI 和文件信息，安装说明见包内 `BINARY.md`。
 
 `Debug` 与 `RelWithDebInfo` 使用 `/Zi` 或 `/ZI` 编译时，打包会将 compiler PDB 按原文件名放在对应静态库同目录，以便目标项目链接完整调试符号。使用 `/Z7` 编译时，调试信息包含在库内。二进制包不包含 C++ 实现源码；源码级调试需要开发者另行提供匹配的源码。
 

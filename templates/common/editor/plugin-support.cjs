@@ -5,6 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const OWNER = 'cocos-plugin-dev';
+const ANDROID_ABIS = ['arm64-v8a', 'armeabi-v7a', 'x86_64', 'x86'];
 const heldLocks = new Set();
 const fileHashBuffer = Buffer.allocUnsafe(1024 * 1024);
 
@@ -83,7 +84,7 @@ function recoverDeadLock(project, directory, ownerFile) {
     // newly acquired operation lock using an owner record they read earlier.
     const recovery = path.join(project, '.plugin-dev', 'operation-recovery.lock');
     noLinks(project, recovery);
-    try { fs.mkdirSync(recovery); } catch (error) { if (error.code === 'EEXIST') return; throw error; }
+    try { fs.mkdirSync(recovery); } catch (error) { if (error.code === 'EEXIST' || (process.platform === 'win32' && error.code === 'EPERM')) return; throw error; }
     try {
         if (!fs.existsSync(ownerFile)) return;
         const owner = readJson(ownerFile);
@@ -176,16 +177,22 @@ function normalizeRelTarget(value) {
     return parts.join('/');
 }
 function validateRuntimeFilesSpec(pluginPath, runtimeFiles) {
-    if (runtimeFiles === undefined) return;
+    if (runtimeFiles === undefined) return [];
     if (!Array.isArray(runtimeFiles)) fail(`插件 runtimeFiles 必须是数组: ${pluginPath}`);
-    for (const entry of runtimeFiles) {
-        const source = typeof entry === 'string' ? entry : entry && typeof entry === 'object' ? entry.source : null;
-        const target = typeof entry === 'string' ? null : entry && typeof entry === 'object' ? entry.target : null;
+    return runtimeFiles.map(entry => {
+        const { source, target, platform } = typeof entry === 'string' ? { source: entry } : entry || {};
         if (typeof source !== 'string' || !source.trim()) fail(`插件 runtimeFiles 条目缺少有效的 source: ${pluginPath}`);
-        if (target !== null && target !== undefined) normalizeRelTarget(target);
-        const resolved = inside(pluginPath, path.join(pluginPath, source));
+        const parts = source.replace(/\\/g, '/').split('/');
+        if (path.posix.isAbsolute(source) || path.win32.isAbsolute(source) || parts.includes('..')) fail(`路径越界: ${source} (${pluginPath})`);
+        const relative = parts.filter(part => part && part !== '.').join('/');
+        if (relative) normalizeRelTarget(relative);
+        if (platform !== undefined && !['windows', 'android', 'all'].includes(platform)) {
+            fail(`插件 runtimeFiles 条目的 platform 无效: ${platform} (${pluginPath})`);
+        }
+        const resolved = inside(pluginPath, path.join(pluginPath, relative));
         noLinks(pluginPath, resolved);
-    }
+        return { relative, source: resolved, target: target == null ? null : normalizeRelTarget(target), platform };
+    });
 }
 function sourceInfo(sourcePath, expectedName) {
     const source = path.resolve(sourcePath);
@@ -226,7 +233,7 @@ function adapterFiles(info, enabled) {
     files.set('package.json', Buffer.from(`${JSON.stringify({ ...pkg, main: './editor/main.js', contributions: { ...pkg.contributions, builder: './editor/builder.js' } }, null, 2)}\n`));
     files.set('editor/main.js', fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8').replace(/\{\{NAME\}\}/g, info.meta.name));
     files.set('editor/plugin-support.cjs', fs.readFileSync(__filename));
-    for (const file of ['builder.js', 'build-hooks.cjs', 'runtime-deployment.cjs', 'runtime-build.cmake', 'deploy-runtime.cjs', 'windows-build.cjs', 'windows-build.cmake', 'typescript-plugin.cjs']) {
+    for (const file of ['builder.js', 'build-hooks.cjs', 'runtime-deployment.cjs', 'android-build.cjs', 'runtime-build.cmake', 'deploy-runtime.cjs', 'windows-build.cjs', 'windows-build.cmake', 'typescript-plugin.cjs']) {
         files.set(`editor/${file}`, fs.readFileSync(path.join(__dirname, file), 'utf8').replace(/\{\{NAME\}\}/g, info.meta.name));
     }
     files.set('native/cc_plugin.json', `${JSON.stringify({ ...native, disabled: !enabled }, null, 2)}\n`);
@@ -284,44 +291,195 @@ function runtimeFilter(rel, item) {
     if (item.isDirectory()) return !['build', 'out', 'cache', 'temp', '.vs', 'CMakeFiles'].includes(item.name);
     return !/\.(obj|pdb|ilk|log|tmp|bak)$/.test(item.name) && item.name !== '.DS_Store';
 }
-function collectRuntimeFiles(pluginPath, meta, fileHashes = new Map()) {
-    const resolvedRoot = path.resolve(pluginPath);
-    noLinks(path.parse(resolvedRoot).root, resolvedRoot);
-    const descriptor = meta || (fs.existsSync(path.join(resolvedRoot, 'plugin-dev.json')) ? readJson(path.join(resolvedRoot, 'plugin-dev.json')) : {});
-    validateRuntimeFilesSpec(resolvedRoot, descriptor.runtimeFiles);
+function cachedFileHash(source, fileHashes) {
+    const key = path.resolve(source);
+    if (!fileHashes.has(key)) fileHashes.set(key, hashFile(source));
+    return fileHashes.get(key);
+}
+function verifyBinaryManifest(root, descriptor, platform, fileHashes) {
+    const distribution = descriptor?.distribution;
+    const isDistributedBinary = distribution?.type === 'binary' && (distribution.platform === platform
+        || (Array.isArray(distribution.platforms) && distribution.platforms.includes(platform)));
+    const manifestFile = path.join(root, 'native', platform, 'binary-manifest.json');
+    noLinks(root, manifestFile);
+    if (!fs.existsSync(manifestFile)) {
+        if (isDistributedBinary) fail(`缺少二进制文件记录: ${manifestFile}`);
+        return null;
+    }
+    const manifest = readJson(manifestFile);
+    const files = manifest?.files;
+    if (!files || typeof files !== 'object' || Array.isArray(files)) fail(`二进制文件记录无效: ${manifestFile}`);
+    for (const [file, sha256] of Object.entries(files)) {
+        if (normalizeRelTarget(file) !== file || typeof sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(sha256)) {
+            fail(`二进制文件记录无效: ${file}`);
+        }
+        const source = path.join(root, file);
+        noLinks(root, source);
+        const stat = fs.statSync(source, { throwIfNoEntry: false });
+        if (!stat) fail(`二进制${/\.so$/i.test(file) ? '动态库' : '文件'}不存在: ${source}`);
+        if (!stat.isFile()) fail(`需要普通文件: ${source}`);
+        if (cachedFileHash(source, fileHashes) !== sha256) fail(`二进制文件 SHA-256 不匹配: ${source}`);
+    }
+    return manifest;
+}
+function runtimeEntries(fileHashes, conflictMessage) {
     const entries = new Map();
-    const recordFile = (targetRel, absSource) => {
-        const normalizedTarget = normalizeRelTarget(targetRel);
-        const key = normalizedTarget.toLowerCase();
-        const sourceKey = path.resolve(absSource);
-        if (!fileHashes.has(sourceKey)) fileHashes.set(sourceKey, hashFile(absSource));
-        const sha256 = fileHashes.get(sourceKey);
-        const existing = entries.get(key);
-        if (existing && existing.sha256 !== sha256) fail(`插件内部运行时文件目标冲突: ${normalizedTarget}`);
-        entries.set(key, { target: normalizedTarget, source: absSource, sha256 });
+    return {
+        add(relative, source, platform) {
+            const target = normalizeRelTarget(relative);
+            const key = target.toLowerCase();
+            const sha256 = cachedFileHash(source, fileHashes);
+            if (entries.has(key) && entries.get(key).sha256 !== sha256) fail(`${conflictMessage}: ${target}`);
+            entries.set(key, { target, source, sha256, ...(platform === undefined ? {} : { platform }) });
+        },
+        list: () => [...entries.values()].sort((a, b) => a.target.localeCompare(b.target)),
     };
-    for (const binRel of ['native/third_party/bin', 'native/windows/bin']) {
+}
+function isWindowsNativeSource(relative) {
+    return /^native\/windows(?:\/|$)/i.test(relative);
+}
+function isLegacyWindowsBin(relative) {
+    return /^native\/third_party\/bin(?:\/|$)/i.test(relative);
+}
+function collectPlatformRuntimeFiles(pluginPath, meta, fileHashes, platform, includePlatform = false) {
+    const resolvedRoot = path.resolve(pluginPath);
+    const descriptorFile = path.join(resolvedRoot, 'plugin-dev.json');
+    noLinks(path.parse(resolvedRoot).root, descriptorFile);
+    const descriptor = meta || (fs.existsSync(descriptorFile) ? readJson(descriptorFile) : {});
+    verifyBinaryManifest(resolvedRoot, descriptor, platform, fileHashes);
+    const declared = validateRuntimeFilesSpec(resolvedRoot, descriptor.runtimeFiles);
+    const entries = runtimeEntries(fileHashes, '插件内部运行时文件目标冲突');
+    const windowsBins = platform === 'windows' ? ['native/third_party/bin', 'native/windows/bin'] : [];
+    const androidOnly = declared.filter(item => item.platform === 'android').map(item => item.relative.toLowerCase());
+    for (const binRel of windowsBins) {
         const binDir = path.join(resolvedRoot, binRel);
         noLinks(resolvedRoot, binDir);
-        if (!fs.existsSync(binDir)) continue;
-        for (const rel of walk(binDir, runtimeFilter)) recordFile(rel, path.join(binDir, rel));
+        const collect = (rel, entry) => {
+            const file = `${binRel}/${rel}`.toLowerCase();
+            return runtimeFilter(rel, entry) && !androidOnly.some(source => !source || file === source || file.startsWith(`${source}/`));
+        };
+        for (const rel of walk(binDir, collect)) entries.add(rel, path.join(binDir, rel), includePlatform ? 'windows' : undefined);
     }
-    for (const item of descriptor.runtimeFiles || []) {
-        const sourceRel = typeof item === 'string' ? item : item.source;
-        const targetSpec = typeof item === 'string' ? null : item.target;
-        const absSource = inside(resolvedRoot, path.join(resolvedRoot, sourceRel));
-        noLinks(resolvedRoot, absSource);
-        if (!fs.existsSync(absSource)) fail(`插件声明的运行时文件不存在: ${absSource}`);
-        if (fs.statSync(absSource).isDirectory()) {
-            const prefix = targetSpec ? normalizeRelTarget(targetSpec) : '';
-            for (const rel of walk(absSource, runtimeFilter)) {
-                recordFile(prefix ? `${prefix}/${rel}` : rel, path.join(absSource, rel));
+    for (const item of declared) {
+        if (item.platform && item.platform !== 'all' && item.platform !== platform) continue;
+        const { relative, source, target } = item;
+        if (platform === 'android' && isWindowsNativeSource(relative)) continue;
+        const stat = fs.statSync(source, { throwIfNoEntry: false });
+        if (!stat) fail(`插件声明的运行时文件不存在: ${source}`);
+        const add = (target, file, relativeSource) => {
+            const windowsSource = isWindowsNativeSource(relativeSource) || (platform === 'windows' && isLegacyWindowsBin(relativeSource));
+            const runtimePlatform = windowsSource ? 'windows' : item.platform;
+            entries.add(target, file, includePlatform ? runtimePlatform : undefined);
+        };
+        if (stat.isDirectory()) {
+            if (platform === 'android' && isLegacyWindowsBin(relative)) continue;
+            const collect = (rel, entry) => {
+                const file = relative ? `${relative}/${rel}` : rel;
+                return runtimeFilter(rel, entry) && !(platform === 'android' && (isWindowsNativeSource(file) || isLegacyWindowsBin(file)));
+            };
+            for (const rel of walk(source, collect)) {
+                add(target ? `${target}/${rel}` : rel, path.join(source, rel), relative ? `${relative}/${rel}` : rel);
             }
         } else {
-            recordFile(targetSpec ? normalizeRelTarget(targetSpec) : path.basename(absSource), absSource);
+            if (!stat.isFile()) fail(`需要普通文件: ${source}`);
+            add(target || path.basename(source), source, relative);
         }
     }
-    return [...entries.values()].sort((a, b) => a.target.localeCompare(b.target));
+    return entries.list();
+}
+function collectRuntimeFiles(pluginPath, meta, fileHashes = new Map()) {
+    return collectPlatformRuntimeFiles(pluginPath, meta, fileHashes, 'windows');
+}
+function collectAndroidRuntimeAssets(pluginPath, meta, fileHashes = new Map()) {
+    return collectPlatformRuntimeFiles(pluginPath, meta, fileHashes, 'android');
+}
+function collectPackageRuntimeFiles(pluginPath, meta, platform) {
+    return collectPlatformRuntimeFiles(pluginPath, meta, new Map(), platform, true);
+}
+function validateAndroidAbis(abis) {
+    if (abis === undefined) return;
+    if (!Array.isArray(abis)) fail('Android abis 必须是 ABI 名称数组。');
+    for (const abi of abis) if (!ANDROID_ABIS.includes(abi)) fail(`不支持的 Android ABI: ${abi}`);
+}
+function androidBinaryLibs(root, descriptor, abis, buildType, fileHashes, entries) {
+    const manifest = verifyBinaryManifest(root, descriptor, 'android', fileHashes);
+    if (!manifest) return;
+    const { files } = manifest;
+    let requestedConfig = buildType?.toLowerCase();
+    if (requestedConfig && (typeof manifest.buildType === 'string' || Array.isArray(manifest.buildTypes))) {
+        const buildTypes = Array.isArray(manifest.buildTypes) ? manifest.buildTypes : [manifest.buildType];
+        const supportedConfigs = buildTypes.map(config => typeof config === 'string' ? config.toLowerCase() : null);
+        if (requestedConfig === 'relwithdebinfo' && !supportedConfigs.includes(requestedConfig) && supportedConfigs.includes('release')) {
+            requestedConfig = 'release';
+        }
+        if (!supportedConfigs.includes(requestedConfig)) fail(`Android 二进制插件不支持构建配置: ${buildType}`);
+    }
+    const runtimeLibs = Object.hasOwn(manifest, 'runtimeLibs') ? manifest.runtimeLibs : Object.keys(files);
+    if (!Array.isArray(runtimeLibs)) fail(`Android 二进制 runtimeLibs 必须是文件路径数组: ${path.join(root, 'native/android/binary-manifest.json')}`);
+    const thirdPartyPrefix = 'native/third_party/android/';
+    const layouts = new Map();
+    const configs = new Map();
+    for (const file of Object.keys(files)) {
+        const lower = file.toLowerCase();
+        const thirdParty = lower.startsWith(thirdPartyPrefix);
+        if (!thirdParty && !lower.startsWith('native/android/')) continue;
+        if (thirdParty) {
+            const [abi, ...rest] = file.slice(thirdPartyPrefix.length).split('/');
+            if (rest.length && /\.so$/i.test(file)) layouts.set(file, { abi, config: null });
+            continue;
+        }
+        const [first, second, ...rest] = file.slice('native/android/'.length).split('/');
+        const libsDirectory = first.toLowerCase() === 'libs';
+        const abi = libsDirectory ? second : first;
+        const config = !libsDirectory && rest.length && second.toLowerCase() !== 'lib' ? second.toLowerCase() : null;
+        layouts.set(file, { abi, config });
+        if (config && ANDROID_ABIS.includes(abi)) {
+            if (!configs.has(abi)) configs.set(abi, new Set());
+            configs.get(abi).add(config);
+        }
+    }
+    for (const file of runtimeLibs) {
+        if (typeof file !== 'string' || !Object.hasOwn(files, file)) fail(`Android 二进制文件记录缺少 SHA-256: ${file}`);
+        if (!layouts.has(file) || !/\.so$/i.test(file)) continue;
+        const { abi, config } = layouts.get(file);
+        if (!ANDROID_ABIS.includes(abi)) fail(`Android 二进制动态库的 ABI 无效: ${file}`);
+        const source = path.join(root, file);
+        const selectedConfig = requestedConfig === 'relwithdebinfo' && !configs.get(abi)?.has(requestedConfig)
+            ? 'release' : requestedConfig;
+        if (abis.includes(abi) && (!config || !selectedConfig || config === selectedConfig)) {
+            const target = file.toLowerCase().startsWith(thirdPartyPrefix)
+                ? file.slice(thirdPartyPrefix.length) : `${abi}/${path.basename(file)}`;
+            entries.add(target, source);
+        }
+    }
+}
+function collectAndroidNativeLibs(pluginPath, meta, options = {}, fileHashes = new Map()) {
+    const { abis, buildType } = options;
+    validateAndroidAbis(abis);
+    if (buildType !== undefined && (typeof buildType !== 'string' || !buildType.trim())) fail(`Android 构建配置无效: ${buildType}`);
+    const selected = abis?.length ? abis : ANDROID_ABIS;
+    const root = path.resolve(pluginPath);
+    noLinks(path.parse(root).root, root);
+    const descriptorFile = path.join(root, 'plugin-dev.json');
+    noLinks(root, descriptorFile);
+    const descriptor = meta || (fs.existsSync(descriptorFile) ? readJson(descriptorFile) : {});
+    const entries = runtimeEntries(fileHashes, '插件内部 Android 动态库目标冲突');
+    for (const relative of ['native/android/libs', 'native/third_party/android']) {
+        const directory = path.join(root, relative);
+        noLinks(root, directory);
+        for (const file of walk(directory, (rel, item) => /\.(jar|aar)$/i.test(rel) && !item.isDirectory())) {
+            entries.add(file, path.join(directory, file));
+        }
+        for (const abi of new Set(selected)) {
+            const abiDirectory = path.join(directory, abi);
+            noLinks(root, abiDirectory);
+            for (const file of walk(abiDirectory, (rel, item) => item.isDirectory() || item.isSymbolicLink() || /\.so$/i.test(rel))) {
+                entries.add(`${abi}/${file}`, path.join(abiDirectory, file));
+            }
+        }
+    }
+    androidBinaryLibs(root, descriptor, selected, buildType, fileHashes, entries);
+    return entries.list();
 }
 function nativeFingerprint(pluginPath, meta) {
     const root = path.join(pluginPath, 'native');
@@ -338,6 +496,9 @@ function nativeFingerprint(pluginPath, meta) {
     const descriptor = meta || (fs.existsSync(path.join(pluginPath, 'plugin-dev.json')) ? readJson(path.join(pluginPath, 'plugin-dev.json')) : {});
     if (Array.isArray(descriptor.runtimeFiles) && descriptor.runtimeFiles.length) {
         for (const item of runtimeItems) entries.push(`runtime:${item.target}:${item.sha256}`);
+        for (const item of collectAndroidRuntimeAssets(pluginPath, descriptor, fileHashes)) {
+            entries.push(`android-runtime:${item.target}:${item.sha256}`);
+        }
     }
     return hash(entries.join('\n'));
 }
@@ -616,4 +777,4 @@ function setEnabled({ projectPath, name, enabled }) {
     const project = projectRoot(projectPath);
     return withProjectLock(project, () => applySync(prepareSync(project, name, enabled)));
 }
-module.exports = { OWNER, validateName, normalizeRelTarget, inside, noLinks, projectRoot, readJson, write, writeJson, hash, hashFile, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, collectRuntimeFiles, syncTypeDeclarations, prepareTypeScriptSdk, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };
+module.exports = { OWNER, validateName, normalizeRelTarget, inside, noLinks, projectRoot, readJson, write, writeJson, hash, hashFile, ensureLocalIgnore, withProjectLock, readState, readHost, sourceInfo, walk, pluginInfo, adapterFiles, prepareAdapter, applyAdapter, enabledRuntime, collectRuntimeFiles, collectAndroidRuntimeAssets, collectAndroidNativeLibs, collectPackageRuntimeFiles, validateAndroidAbis, syncTypeDeclarations, prepareTypeScriptSdk, nativeFingerprint, prepareSync, applySync, syncPlugin, setEnabled };

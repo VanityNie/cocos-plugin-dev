@@ -166,19 +166,43 @@ function deployUnlocked(project, executablePath) {
         }
         manifest.outputs[outputKey] = { ...output, files: retained };
     }
+    applyDeployment(writes, deletes, manifestFile, manifest);
+    return { deployed: writes.length, removed: deletes.length, files: Object.values(nextFiles).map(item => item.target),
+        manifestPath: manifestFile, legacyUnowned: !!manifest.legacyUnowned };
+}
+function applyDeployment(writes, deletes, manifestFile, manifest, {
+    verify = () => {}, cleanup = () => {},
+} = {}) {
     const staged = [];
-    try {
-        for (const operation of writes) {
+    const stage = operation => {
+        noLinks(operation.dest);
+        fs.mkdirSync(path.dirname(operation.dest), { recursive: true });
+        const temporary = path.join(path.dirname(operation.dest), `.cpd-${crypto.randomUUID()}.tmp`);
+        if (operation.source) {
             noLinks(operation.source);
-            noLinks(operation.dest);
-            fs.mkdirSync(path.dirname(operation.dest), { recursive: true });
-            const temporary = path.join(path.dirname(operation.dest), `.cpd-${crypto.randomUUID()}.tmp`);
             fs.copyFileSync(operation.source, temporary, fs.constants.COPYFILE_EXCL);
             staged.push({ ...operation, temporary });
-            if (support.hashFile(temporary) !== operation.sha256) throw new Error(`准备部署期间运行时来源文件发生修改: ${operation.source}`);
+        } else {
+            const descriptor = fs.openSync(temporary, 'wx');
+            staged.push({ ...operation, temporary });
+            try { fs.writeFileSync(descriptor, operation.bytes); }
+            finally { fs.closeSync(descriptor); }
         }
+        if (fileHash(temporary) !== operation.sha256) throw new Error(`准备部署期间暂存文件 SHA-256 不匹配: ${operation.source || operation.dest}`);
+    };
+    noLinks(manifestFile);
+    const manifestHash = fileHash(manifestFile);
+    const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
+    const nextManifestHash = support.hash(bytes);
+    try {
+        for (const operation of writes) stage(operation);
+        if (manifestHash !== nextManifestHash) stage({ dest: manifestFile, previousHash: manifestHash, sha256: nextManifestHash, bytes });
         // 全部复制内容与目标归属验证通过后，才修改受管文件。
         for (const operation of staged) {
+            if (operation.source) {
+                noLinks(operation.source);
+                if (fileHash(operation.source) !== operation.sha256) throw new Error(`准备部署期间运行时来源文件发生修改: ${operation.source}`);
+            }
             noLinks(operation.dest);
             if (fileHash(operation.dest) !== operation.previousHash) throw new Error(`准备部署期间目标文件发生修改: ${operation.dest}`);
         }
@@ -186,18 +210,19 @@ function deployUnlocked(project, executablePath) {
             noLinks(operation.dest);
             if (fileHash(operation.dest) !== operation.sha256) throw new Error(`准备部署期间目标文件发生修改: ${operation.dest}`);
         }
-        for (const operation of staged) fs.renameSync(operation.temporary, operation.dest);
+        verify();
+        for (const operation of staged) if (operation.source) fs.renameSync(operation.temporary, operation.dest);
         for (const operation of deletes) fs.unlinkSync(operation.dest);
-        support.writeJson(manifestFile, manifest);
+        cleanup();
+        const stagedManifest = staged[writes.length];
+        if (stagedManifest) fs.renameSync(stagedManifest.temporary, manifestFile);
     } finally {
         for (const operation of staged) if (fs.existsSync(operation.temporary)) fs.unlinkSync(operation.temporary);
     }
-    return { deployed: writes.length, removed: deletes.length, files: Object.values(nextFiles).map(item => item.target),
-        manifestPath: manifestFile, legacyUnowned: !!manifest.legacyUnowned };
 }
 function deployRuntimeFiles(projectPath, executablePath) {
     const project = support.projectRoot(projectPath);
     return support.withProjectLock(project, () => deployUnlocked(project, executablePath));
 }
 
-module.exports = { deployRuntimeFiles };
+module.exports = { deployRuntimeFiles, _internal: { directoryKey, objectRecord, noLinks, targetPath, fileHash, enabledPlugins, applyDeployment } };
